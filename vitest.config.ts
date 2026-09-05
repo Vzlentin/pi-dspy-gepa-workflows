@@ -5,7 +5,7 @@ export default defineConfig({
     testTimeout: 60_000,
     hookTimeout: 60_000,
     include: ["test/**/*.test.ts"],
-    exclude: ["test/e2e/**", "test/acceptance/**", "node_modules/**"],
+    exclude: ["test/e2e/**", "node_modules/**"],
     coverage: {
       provider: "istanbul",
       include: ["src/**"],

@@ -16,11 +16,14 @@ export type Reviewer = (
   },
   signal: AbortSignal,
 ) => Promise<unknown>;
-export type Reviewers = { workflow: Reviewer; acceptance: Reviewer };
+/**
+ * Run the recorded checks and the fixed independent evaluator. `passed` stays false until
+ * the host records the learned review stage against this same evidence.
+ */
 export async function verify(
   campaign: Campaign,
   artifacts: string,
-  reviewers: Reviewers,
+  evaluator: Reviewer,
   signal: AbortSignal,
 ): Promise<Evidence> {
   const directory = join(artifacts, randomUUID());
@@ -61,24 +64,13 @@ export async function verify(
       diff: after.diff,
       checks: evidence.checks,
     };
-    evidence.workflowReview = validate(ReviewSchema, await reviewers.workflow(input, signal));
-    signal.throwIfAborted();
-    if ((await treeSnapshot(campaign.worktree)).fingerprint !== before.fingerprint)
-      throw new Error("Working tree changed during workflow review");
     if (evidence.checks.some((check) => check.exitCode !== 0))
       throw new Error("Required checks failed");
-    // The fixed evaluator never sees the learned review's verdict or prompts.
-    evidence.review = validate(ReviewSchema, await reviewers.acceptance(input, signal));
+    // The fixed evaluator never sees the learned review's verdict, prompts, or examples.
+    evidence.review = validate(ReviewSchema, await evaluator(input, signal));
     signal.throwIfAborted();
     if ((await treeSnapshot(campaign.worktree)).fingerprint !== before.fingerprint)
-      throw new Error("Working tree changed during review");
-    evidence.passed =
-      evidence.workflowReview.completeness &&
-      evidence.workflowReview.correctness &&
-      evidence.workflowReview.maintainability &&
-      evidence.review.completeness &&
-      evidence.review.correctness &&
-      evidence.review.maintainability;
+      throw new Error("Working tree changed during independent review");
   } catch (error) {
     evidence.error = String(error);
   }

@@ -3,41 +3,38 @@ import json
 from gepa import optimize
 from gepa.core.adapter import EvaluationBatch
 
-from .program import INPUTS, STAGES, Action, Review
+from .program import REVIEW_INPUTS, STAGES, Review
+
+FIELDS = tuple(f"{stage}.instructions" for stage in STAGES) + ("review.demonstrations",)
 
 
 def components(candidate):
-    expected = {
-        f"{stage}.{field}" for stage in STAGES for field in ("instructions", "demonstrations")
-    }
-    if set(candidate) != expected:
-        raise ValueError("GEPA may change only stage instructions and demonstrations")
+    if set(candidate) != set(FIELDS):
+        raise ValueError("GEPA may change only stage instructions and review demonstrations")
     stages = {}
     for stage in STAGES:
         instructions = candidate[f"{stage}.instructions"]
         if not isinstance(instructions, str) or not instructions.strip():
             raise ValueError("Instructions must be nonempty text")
-        examples = json.loads(candidate[f"{stage}.demonstrations"])
-        if not isinstance(examples, list):
-            raise ValueError("Demonstrations must be an array")
-        output = "review" if stage == "review" else "action"
-        output_type = Review if stage == "review" else Action
-        for example in examples:
-            if set(example) != {"input", output} or set(example["input"]) != set(INPUTS):
-                raise ValueError("Invalid stage demonstration fields")
-            if not all(isinstance(value, str) for value in example["input"].values()):
-                raise ValueError("Demonstration inputs must be text")
-            output_type.model_validate(example[output])
-        stages[stage] = {"instructions": instructions, "demonstrations": examples}
+        stages[stage] = {"instructions": instructions}
+    examples = json.loads(candidate["review.demonstrations"])
+    if not isinstance(examples, list):
+        raise ValueError("Demonstrations must be an array")
+    for example in examples:
+        if set(example) != {"input", "review"} or set(example["input"]) != set(REVIEW_INPUTS):
+            raise ValueError("Invalid review demonstration fields")
+        if not all(isinstance(value, str) for value in example["input"].values()):
+            raise ValueError("Demonstration inputs must be text")
+        Review.model_validate(example["review"])
+    stages["review"]["demonstrations"] = examples
     return {"stages": stages}
 
 
 def texts(candidate):
-    return {
-        f"{stage}.{field}": json.dumps(value) if field == "demonstrations" else value
-        for stage, policy in candidate["stages"].items()
-        for field, value in policy.items()
-    }
+    stages = candidate["stages"]
+    result = {f"{stage}.instructions": stages[stage]["instructions"] for stage in STAGES}
+    result["review.demonstrations"] = json.dumps(stages["review"]["demonstrations"])
+    return result
 
 
 class CampaignAdapter:

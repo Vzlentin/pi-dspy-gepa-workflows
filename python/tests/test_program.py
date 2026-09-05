@@ -4,71 +4,147 @@ import json
 import pytest
 
 from pi_dspy_gepa.learning import CampaignAdapter, components, learn, texts
-from pi_dspy_gepa.program import STAGES, Action, CampaignProgram, decide
+from pi_dspy_gepa.program import REPAIR_PROMPT, STAGES, Report, ShippingCampaign, campaign
 from pi_dspy_gepa.worker import serve
+
+REVIEW = {
+    "schema": "pi-dspy-gepa.review.v1",
+    "completeness": True,
+    "correctness": False,
+    "maintainability": True,
+    "findings": "Fix the edge case.",
+}
+OUTPUTS = {
+    "plan": {"plan": {"plan": "Do it", "criteria": ["done"], "commands": ["true"], "blocker": ""}},
+    "implement": {"report": {"summary": "Implemented", "notes": ["n1"], "blocker": ""}},
+    "review": {"review": REVIEW},
+    "fix": {"report": {"summary": "Fixed", "notes": [], "blocker": ""}},
+}
+NEXT = {"plan": "implement", "implement": "review", "review": "fix", "fix": "review"}
 
 
 def candidate():
-    return {
-        "stages": {
-            stage: {"instructions": f"Perform {stage} precisely.", "demonstrations": []}
-            for stage in STAGES
-        }
-    }
+    value = {"stages": {stage: {"instructions": f"Perform {stage} precisely."} for stage in STAGES}}
+    value["stages"]["review"]["demonstrations"] = []
+    return value
 
 
-def inputs():
-    return {"inheritedInstructions": "rules", "brief": "goal", "context": "[]", "tools": "[]"}
+class Host:
+    """Deterministic campaign host: owns the stage order and records every exchange with its stage."""
+
+    def __init__(self, stage="plan", responses=None, verdicts=(False, True)):
+        self.state = {"status": "active", "stage": stage}
+        self.calls = []
+        self.responses = list(responses or [])
+        self.verdicts = list(verdicts)
+        self.sessions = []
+
+    def __call__(self, kind, payload):
+        stage = self.state["stage"]
+        self.calls.append((kind, {"stage": stage, **payload}))
+        if kind == "status":
+            return dict(self.state)
+        if kind == "inputs":
+            inputs = {"inheritedInstructions": "rules", "brief": "goal", **self.state}
+            if stage == "review":
+                inputs["evidence"] = "diff and checks"
+            return inputs
+        if kind == "session":
+            self.sessions.append(self.calls[-1][1])
+            if self.responses:
+                return {"text": self.responses.pop(0)}
+            return {"text": json.dumps(OUTPUTS[stage])}
+        assert kind == "record"
+        if stage == "review" and self.verdicts.pop(0):
+            self.state["status"] = "completed"
+        elif payload["output"].get("blocker"):
+            self.state["status"] = "blocked"
+        else:
+            self.state["stage"] = NEXT[stage]
+        return dict(self.state)
 
 
-def output(stage):
-    if stage == "review":
-        return {
-            "review": {
-                "schema": "pi-dspy-gepa.review.v1",
-                "completeness": True,
-                "correctness": False,
-                "maintainability": True,
-                "findings": "Fix the edge case.",
-            }
-        }
-    return {"action": {"text": "done", "toolCalls": []}}
+def stages(host):
+    return [payload["stage"] for kind, payload in host.calls if kind == "record"]
 
 
-@pytest.mark.parametrize("stage", STAGES)
-def test_real_dspy_program_routes_named_stages_and_typed_outputs(stage):
-    calls = []
+def test_forward_declares_plan_implement_review_fix_review_in_fresh_sessions():
+    host = Host()
+    result = campaign(candidate(), host)
+    assert result["status"] == "completed"
+    assert stages(host) == ["plan", "implement", "review", "fix", "review"]
+    assert all(session["fresh"] for session in host.sessions)
+    assert [session["stage"] for session in host.sessions] == stages(host)
+    for session in host.sessions:
+        assert f"Perform {session['stage']} precisely" in session["prompt"]
+        assert "goal" in session["prompt"]
+    assert "diff and checks" in host.sessions[2]["prompt"]
+    assert {name for name, _ in ShippingCampaign(candidate(), host).named_predictors()} == set(
+        STAGES
+    )
+    recorded = [payload for kind, payload in host.calls if kind == "record"]
+    assert recorded[0]["output"] == OUTPUTS["plan"]["plan"]
+    assert recorded[2]["output"] == REVIEW
+    assert set(recorded[2]["input"]) == {"inheritedInstructions", "brief", "evidence"}
 
-    def exchange(kind, payload):
-        calls.append((kind, payload))
-        return {"text": json.dumps(output(stage))}
 
-    result = decide(candidate(), stage, inputs(), exchange)
-    field = "review" if stage == "review" else "action"
-    assert result[field] == output(stage)[field]
-    assert calls[0][0] == "model"
-    assert f"Perform {stage} precisely" in json.dumps(calls)
-    assert {name for name, _ in CampaignProgram(candidate()).named_predictors()} == set(STAGES)
-
-
-def test_unknown_stage_cannot_change_the_workflow():
-    with pytest.raises(ValueError, match="Unknown workflow stage"):
-        decide(candidate(), "deploy", inputs(), lambda *_: None)
+@pytest.mark.parametrize(
+    "stage,expected",
+    [
+        ("implement", ["implement", "review", "fix", "review"]),
+        ("review", ["review", "fix", "review"]),
+        ("fix", ["fix", "review", "fix", "review"]),
+    ],
+)
+def test_resume_restarts_the_recorded_stage_without_replay(stage, expected):
+    host = Host(stage=stage)
+    campaign(candidate(), host)
+    assert stages(host) == expected
 
 
-@pytest.mark.parametrize("stage", STAGES)
-def test_demonstrations_are_applied_only_to_their_stage(stage):
+def test_repairs_a_missing_json_object_in_the_same_session_once():
+    host = Host(responses=["I will plan this now.", json.dumps(OUTPUTS["plan"])])
+    campaign(candidate(), host)
+    assert host.sessions[0]["fresh"] is True
+    assert host.sessions[1] == {"stage": "plan", "fresh": False, "prompt": REPAIR_PROMPT}
+    assert host.sessions[2]["stage"] == "implement"
+    with pytest.raises(Exception):
+        campaign(candidate(), Host(responses=["no json", "still no json"]))
+
+
+def test_blockers_and_pauses_stop_the_workflow_without_further_sessions():
+    blocked = Host(
+        responses=[
+            json.dumps({"plan": {"plan": "?", "criteria": [], "commands": [], "blocker": "Which"}})
+        ]
+    )
+    assert campaign(candidate(), blocked)["status"] == "blocked"
+    assert len(blocked.sessions) == 1
+
+    class Paused(Host):
+        def __call__(self, kind, payload):
+            result = super().__call__(kind, payload)
+            if kind == "record" and self.calls[-1][1]["stage"] == "implement":
+                self.state["status"] = "paused"
+            return result
+
+    paused = Paused()
+    assert campaign(candidate(), paused)["status"] == "paused"
+    assert stages(paused) == ["plan", "implement"]
+
+
+def test_review_demonstrations_reach_only_the_review_session():
     value = candidate()
-    value["stages"][stage]["demonstrations"] = [{"input": inputs(), **output(stage)}]
-    requests = []
-
-    def exchange(_kind, payload):
-        requests.append(payload)
-        return {"text": json.dumps(output(stage))}
-
-    decide(value, stage, inputs(), exchange)
-    expected = "Fix the edge case" if stage == "review" else "done"
-    assert expected in json.dumps(requests)
+    value["stages"]["review"]["demonstrations"] = [
+        {
+            "input": {"inheritedInstructions": "r", "brief": "b", "evidence": "e"},
+            "review": {**REVIEW, "findings": "Demonstrated finding"},
+        }
+    ]
+    host = Host(verdicts=(True,))
+    campaign(value, host)
+    assert "Demonstrated finding" in host.sessions[2]["prompt"]
+    assert all("Demonstrated finding" not in s["prompt"] for s in host.sessions[:2])
     assert components(texts(value)) == value
 
 
@@ -77,9 +153,20 @@ def test_demonstrations_are_applied_only_to_their_stage(stage):
     [
         ("code", "evil"),
         ("plan.instructions", ""),
-        ("fix.demonstrations", "{}"),
-        ("implement.demonstrations", '[{"input":{},"action":{}}]'),
-        ("review.demonstrations", json.dumps([{"input": inputs(), **output("plan")}])),
+        ("implement.demonstrations", "[]"),
+        ("review.demonstrations", "{}"),
+        ("review.demonstrations", '[{"input":{},"review":{}}]'),
+        (
+            "review.demonstrations",
+            json.dumps(
+                [
+                    {
+                        "input": {"inheritedInstructions": "r", "brief": "b", "evidence": "e"},
+                        "review": {"schema": "other"},
+                    }
+                ]
+            ),
+        ),
     ],
 )
 def test_optimizer_components_reject_contract_changes(field, value):
@@ -108,13 +195,13 @@ def test_adapter_scores_fixed_evidence_and_preserves_stage_traces():
         CampaignAdapter(lambda *_: [{"score": None}], None).evaluate([], value)
 
 
-def test_learning_uses_standalone_gepa_with_stage_components(monkeypatch):
+def test_learning_uses_standalone_gepa_with_five_text_components(monkeypatch):
     def optimize(**kwargs):
         assert kwargs["max_metric_calls"] == 3
         assert kwargs["trainset"] == [{"role": "training"}]
         assert kwargs["valset"] == [{"role": "validation"}]
         assert kwargs["reflection_lm"]("prompt") == "reflection"
-        assert len(kwargs["seed_candidate"]) == 8
+        assert len(kwargs["seed_candidate"]) == 5
         return type("Result", (), {"candidates": [kwargs["seed_candidate"]]})()
 
     monkeypatch.setattr("pi_dspy_gepa.learning.optimize", optimize)
@@ -130,21 +217,36 @@ def test_learning_uses_standalone_gepa_with_stage_components(monkeypatch):
         learn(request, lambda *_: None)
 
 
-def test_worker_handles_multiple_stages_and_explicit_errors():
-    lines = []
-    for stage in STAGES:
-        lines += [
-            {"operation": "decide", "stage": stage, "candidate": candidate(), "input": inputs()},
-            {"result": {"text": json.dumps(output(stage))}},
-        ]
+def test_worker_drives_a_campaign_over_ndjson_and_reports_explicit_errors():
+    host = Host(verdicts=(True,))
+    lines = [{"operation": "campaign", "candidate": candidate()}]
+    # Replay the host protocol: every request the worker will make gets its scripted answer.
+    for kind, payload in (("status", {}),):
+        lines.append({"result": host(kind, payload)})
+    script = [
+        ("inputs", {}),
+        ("session", {}),
+        ("record", {"output": OUTPUTS["plan"]["plan"]}),
+        ("inputs", {}),
+        ("session", {}),
+        ("record", {"output": OUTPUTS["implement"]["report"]}),
+        ("inputs", {}),
+        ("session", {}),
+        ("record", {"output": REVIEW}),
+    ]
+    for kind, payload in script:
+        lines.append({"result": host(kind, payload)})
     lines.append({"operation": "unsupported"})
     writer = io.StringIO()
     serve(io.StringIO("\n".join(json.dumps(line) for line in lines) + "\n"), writer)
     outputs = [json.loads(line) for line in writer.getvalue().splitlines()]
-    assert len([line for line in outputs if "result" in line]) == 4
-    assert outputs[-1]["error"] == "Unknown Python worker operation"
+    requests = [line for line in outputs if line["schema"] == "pi-dspy-gepa.python-request.v1"]
+    assert [line["kind"] for line in requests][:4] == ["status", "inputs", "session", "record"]
+    responses = [line for line in outputs if line["schema"] == "pi-dspy-gepa.python-response.v1"]
+    assert responses[0]["result"]["status"] == "completed"
+    assert responses[1]["error"] == "Unknown Python worker operation"
     with pytest.raises(ValueError):
-        Action.model_validate({"text": "x", "toolCalls": [], "approve": True})
+        Report.model_validate({"summary": "x", "notes": [], "approve": True})
 
 
 def test_actual_gepa_search_with_deterministic_host_evaluation(tmp_path, monkeypatch):

@@ -7,14 +7,8 @@ const text = Type.String({ minLength: 1 });
 const strings = Type.Array(text);
 const object = <T extends Record<string, TSchema>>(fields: T) =>
   Type.Object(fields, { additionalProperties: false });
-export const ActionSchema = object({
-  text: Type.String(),
-  toolCalls: Type.Array(
-    object({ id: text, name: text, arguments: Type.Record(Type.String(), Type.Unknown()) }),
-  ),
-});
-export type Action = Static<typeof ActionSchema>;
-export const PROGRAM_ID = "pi-dspy-gepa.next-action.v1";
+export const PROGRAM_ID = "pi-dspy-gepa.shipping-campaign.v1";
+export const PI_VERSION = "0.85.0";
 export const STAGES = ["plan", "implement", "review", "fix"] as const;
 export type Stage = (typeof STAGES)[number];
 export const ReviewSchema = object({
@@ -25,24 +19,34 @@ export const ReviewSchema = object({
   findings: text,
 });
 export type Review = Static<typeof ReviewSchema>;
-const DecisionInputSchema = object({
+// Typed stage outputs: the only handoff from a stage's fresh Pi session back to the host.
+export const PlanSchema = object({
+  plan: Type.String(),
+  criteria: strings,
+  commands: strings,
+  blocker: Type.String(),
+});
+export type Plan = Static<typeof PlanSchema>;
+export const ReportSchema = object({
+  summary: Type.String(),
+  notes: strings,
+  blocker: Type.String(),
+});
+export type Report = Static<typeof ReportSchema>;
+const ReviewInputSchema = object({
   inheritedInstructions: Type.String(),
   brief: Type.String(),
-  context: Type.String(),
-  tools: Type.String(),
+  evidence: Type.String(),
 });
-const ActionPolicySchema = object({
-  instructions: text,
-  demonstrations: Type.Array(object({ input: DecisionInputSchema, action: ActionSchema })),
-});
+const PolicySchema = object({ instructions: text });
 export const StagesSchema = object({
-  plan: ActionPolicySchema,
-  implement: ActionPolicySchema,
+  plan: PolicySchema,
+  implement: PolicySchema,
   review: object({
     instructions: text,
-    demonstrations: Type.Array(object({ input: DecisionInputSchema, review: ReviewSchema })),
+    demonstrations: Type.Array(object({ input: ReviewInputSchema, review: ReviewSchema })),
   }),
-  fix: ActionPolicySchema,
+  fix: PolicySchema,
 });
 export const CandidateSchema = object({
   schema: Type.Literal("pi-dspy-gepa.candidate.v1"),
@@ -52,7 +56,7 @@ export const CandidateSchema = object({
   provenance: object({
     dspy: Type.Literal("3.3.1"),
     gepa: Type.Literal("0.1.4"),
-    pi: Type.Literal("0.84.4"),
+    pi: Type.Literal(PI_VERSION),
     programDigest: text,
   }),
 });
@@ -121,7 +125,6 @@ export type Campaign = {
   baseCommit: string;
   baseRef: string;
   worktree: string;
-  sessionPath: string | null;
   goal: string;
   constraints: string[];
   authority: Authority;

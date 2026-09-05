@@ -48,7 +48,6 @@ export async function startCampaign(
     baseCommit,
     baseRef,
     worktree,
-    sessionPath: null,
     goal: input.goal,
     constraints,
     authority: input.authority ?? { ...LOCAL_AUTHORITY },

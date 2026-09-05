@@ -4,8 +4,23 @@ import {
   type AssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { addUsage, zeroUsage } from "./dispatcher.js";
 
+export function zeroUsage(): Usage {
+  return {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
+}
+export function addUsage(total: Usage, usage: Usage): void {
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const)
+    total[key] += usage[key];
+  for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const)
+    total.cost[key] += usage.cost[key];
+}
 const accountedRuntimes = new WeakSet<ModelRuntime>();
 
 export function accountModels(

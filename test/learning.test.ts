@@ -6,11 +6,10 @@ import { evidenceCurrent } from "../src/campaign/verification.js";
 import { startCampaign } from "../src/campaign/workspace.js";
 import { disposableCopy } from "../src/learning/copies.js";
 import { AllowanceMeter, runExperiment } from "../src/learning/experiment.js";
-import { IdleLearning } from "../src/learning/scheduler.js";
 import { runTrial, feedback } from "../src/learning/trial.js";
 import type { EvaluationCase, Trial } from "../src/state/contracts.js";
 import { Store } from "../src/state/store.js";
-import { fixture, FakeWorker, call, review } from "./helpers.js";
+import { fakeSessions, FakeWorker, fixture, plan, program, report, review } from "./helpers.js";
 import { runtimeFixture } from "./runtime-fixture.js";
 
 const fixtures: Awaited<ReturnType<typeof fixture>>[] = [];
@@ -248,11 +247,12 @@ it.each([
     setup: kind === "setup-fail" ? ["exit 4"] : ["printf setup"],
     acceptance: { criteria: ["Goal"], commands: [kind === "check-fail" ? "exit 1" : "true"] },
   };
-  const worker = new FakeWorker([
-    call("campaign", { action: "plan", text: "Inspect and finish the source." }),
-    call("campaign", { action: "review" }),
-    call("campaign", { action: "blocker", text: "Checks or review need fixes" }),
-  ]);
+  const stage = fakeSessions({
+    plan: [plan],
+    implement: [report],
+    review: [{ ...review, correctness: kind !== "workflow-fail" }],
+    fix: [{ ...report, blocker: "Checks or review need fixes" }],
+  });
   const artifacts = join(f.root, 'trials"quoted');
   const result = await runTrial({
     experimentId: "experiment",
@@ -263,21 +263,22 @@ it.each([
     beforeModelCall: () => {},
     sessionOptions: {
       ...services,
-      worker,
-      workflowReviewer: async () => ({ ...review, correctness: kind !== "workflow-fail" }),
-      reviewer: async () =>
+      worker: new FakeWorker([program]),
+      sessions: stage,
+      evaluator: async () =>
         kind === "review-malformed" ? {} : { ...review, maintainability: kind !== "review-fail" },
     },
   });
   if (kind === "pass") {
     expect(result.score).toBe(1);
-    expect(await readFile(result.tracePath, "utf8")).toContain("review");
+    expect(await readFile(result.tracePath, "utf8")).toContain('"stage":"review"');
     expect(await readFile(result.evidence!.checks[0]!.outputPath, "utf8")).toBe("");
+    expect(stage.requests.map((request) => request.stage)).toEqual(["plan", "implement", "review"]);
     const retained = new Store(join(artifacts, result.id, "state", "state.sqlite"));
     try {
       const campaign = retained.campaigns()[0]!;
       expect(campaign.evidence).toEqual(result.evidence);
-      expect(await readFile(campaign.sessionPath!, "utf8")).toContain("review");
+      expect(campaign.acceptance).toEqual(value.acceptance);
       expect(await readFile(join(campaign.worktree, "source.txt"), "utf8")).toBe("starting\n");
       expect(await evidenceCurrent(campaign)).toBe(true);
     } finally {
@@ -295,10 +296,7 @@ it.each(["decision", "shutdown"])(
     const f = await setup();
     const services = await runtimeFixture(f.root);
     const abort = new AbortController();
-    const worker = new FakeWorker([
-      call("campaign", { action: "plan", text: "Inspect and verify." }),
-      call("campaign", { action: "review" }),
-    ]);
+    const worker = new FakeWorker([program]);
     if (when === "shutdown")
       worker.close = async () => {
         abort.abort(new Error("Trial cancelled"));
@@ -313,7 +311,8 @@ it.each(["decision", "shutdown"])(
       sessionOptions: {
         ...services,
         worker,
-        reviewer: async () => {
+        sessions: fakeSessions({ plan: [plan], implement: [report], review: [review] }),
+        evaluator: async () => {
           if (when === "decision") abort.abort(new Error("Trial cancelled"));
           return review;
         },
@@ -331,11 +330,7 @@ it.each(["decision", "shutdown"])(
 it("keeps final source and paths when session cleanup fails", async () => {
   const f = await setup();
   const services = await runtimeFixture(f.root);
-  const worker = new FakeWorker([
-    call("campaign", { action: "plan", text: "Write surviving work and verify." }),
-    call("write", { path: "source.txt", content: "surviving work" }),
-    call("campaign", { action: "review" }),
-  ]);
+  const worker = new FakeWorker([program]);
   worker.close = async () => {
     throw new Error("Cleanup failed");
   };
@@ -347,7 +342,23 @@ it("keeps final source and paths when session cleanup fails", async () => {
     artifacts,
     signal: AbortSignal.timeout(15000),
     beforeModelCall: () => {},
-    sessionOptions: { ...services, worker, reviewer: async () => review },
+    sessionOptions: {
+      ...services,
+      worker,
+      sessions: fakeSessions({
+        plan: [plan],
+        implement: [
+          async (request) => {
+            // The implement session is the only stage that edits the trial worktree.
+            const worktree = /^Worktree: (.+)$/m.exec(request.prompt)![1]!;
+            await writeFile(join(worktree, "source.txt"), "surviving work");
+            return report;
+          },
+        ],
+        review: [review],
+      }),
+      evaluator: async () => review,
+    },
   });
   expect(result).toMatchObject({ status: "error", score: null, error: "Error: Cleanup failed" });
   const retained = new Store(join(artifacts, result.id, "state", "state.sqlite"));
@@ -439,64 +450,4 @@ it("cancels an in-flight experiment when another connection resumes a repository
     await running.catch(() => {});
     connection.close();
   }
-});
-it("starts only at idle, cancels trials when live work resumes, and waits for cleanup on exit", async () => {
-  const f = await setup();
-  const started = vi.fn();
-  const stopped = vi.fn();
-  const scheduler = new IdleLearning(
-    f.control,
-    async (signal) => {
-      started();
-      await new Promise<void>((resolve) => {
-        signal.addEventListener(
-          "abort",
-          () => {
-            stopped();
-            resolve();
-          },
-          { once: true },
-        );
-      });
-    },
-    () => {},
-  );
-  scheduler.update();
-  expect(started).not.toHaveBeenCalled();
-  f.control.pause();
-  await new Promise((resolve) => setImmediate(resolve));
-  expect(started).not.toHaveBeenCalled();
-  f.campaign.status = "completed";
-  f.control.changed();
-  await vi.waitFor(() => expect(started).toHaveBeenCalledTimes(1));
-  scheduler.update();
-  expect(started).toHaveBeenCalledTimes(1);
-  f.campaign.status = "active";
-  f.control.changed();
-  await vi.waitFor(() => expect(stopped).toHaveBeenCalledTimes(1));
-  await scheduler.close();
-  f.control.pause();
-  scheduler.update();
-  expect(started).toHaveBeenCalledTimes(1);
-});
-it("does not admit learning until the completed campaign has actually settled", async () => {
-  const f = await setup();
-  let settled = false;
-  const experiment = vi.fn(async () => {});
-  const scheduler = new IdleLearning(
-    f.control,
-    experiment,
-    () => {},
-    () => settled,
-  );
-  f.control.pause();
-  await new Promise((resolve) => setImmediate(resolve));
-  expect(experiment).not.toHaveBeenCalled();
-  f.campaign.status = "completed";
-  f.control.changed();
-  expect(experiment).not.toHaveBeenCalled();
-  settled = true;
-  scheduler.update();
-  await vi.waitFor(() => expect(experiment).toHaveBeenCalledOnce());
-  await scheduler.close();
 });

@@ -1,23 +1,24 @@
 import { readFile } from "node:fs/promises";
 import { resolve, isAbsolute } from "node:path";
 import { parseArgs } from "node:util";
-import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import { evidenceCurrent } from "../campaign/verification.js";
 import { startCampaign, ownerAlive, ownerToken, repositoryRoot } from "../campaign/workspace.js";
 import { runExperiment } from "../learning/experiment.js";
-import { IdleLearning } from "../learning/scheduler.js";
-import { seedCandidate } from "../runtime/dispatcher.js";
-import { openCampaign } from "../runtime/session.js";
+import { seedCandidate } from "../runtime/policy.js";
+import { openCampaign, type CampaignSession } from "../runtime/session.js";
 import { CaseSchema, validate, type Campaign, type EvaluationCase } from "../state/contracts.js";
 import { Store } from "../state/store.js";
 import { loadConfig } from "./config.js";
 
-export const HELP = `campaign start --repo <absolute-path> --goal <text> [--base <ref>] [--config <file>] [--rlm <package-path>]
-campaign resume <id> [--config <file>] [--rlm <package-path>]
+export const HELP = `campaign start --repo <absolute-path> --goal <text> [--base <ref>] [--config <file>]
+campaign resume <id> [--config <file>]
 campaign status
+campaign learning
+campaign approve <candidate-id> --repo <absolute-path>
 campaign bootstrap --repo <pi-ipython-rlm-path>
 --state <path> selects an isolated private state database.
-In Pi: /campaign status | pause | continue | abort | learning | approve <candidate-id>`;
+Inside Herdr, each stage runs as a visible pi agent in a pane beside this one. Ctrl-C pauses; resume explicitly.`;
+type Config = Awaited<ReturnType<typeof loadConfig>>;
 export async function launch(argv: string[]): Promise<void> {
   const args = parseArgs({
     args: argv,
@@ -28,7 +29,6 @@ export async function launch(argv: string[]): Promise<void> {
       base: { type: "string" },
       config: { type: "string" },
       state: { type: "string" },
-      rlm: { type: "string" },
       help: { type: "boolean" },
     },
   });
@@ -38,164 +38,163 @@ export async function launch(argv: string[]): Promise<void> {
   }
   const store = new Store(args.values.state ? resolve(args.values.state) : undefined);
   try {
-    const command = args.positionals[0];
+    const [command, id = ""] = args.positionals;
     if (command === "status") {
       for (const campaign of store.campaigns())
         console.log(
           JSON.stringify({ ...campaign, evidenceCurrent: await evidenceCurrent(campaign) }),
         );
-      return;
-    }
-    if (command === "bootstrap") {
+    } else if (command === "learning") {
+      console.log(JSON.stringify({ experiments: store.experiments(), trials: store.trials() }));
+    } else if (command === "approve") {
+      if (!id || !args.values.repo) throw new Error(HELP);
+      store.approve(await repositoryRoot(args.values.repo), id);
+      console.log(`Repository default is now ${id}. Existing campaigns remain pinned.`);
+    } else if (command === "bootstrap") {
       if (!args.values.repo) throw new Error("Supply --repo /absolute/path/to/pi-ipython-rlm");
       const { bootstrap } = await import("../learning/historical.js");
       console.log(JSON.stringify(await bootstrap(store, args.values.repo), null, 2));
-      return;
-    }
-    const config = await loadConfig(args.values.config);
-    let campaign: Campaign;
-    if (command === "start") {
-      if (!args.values.repo || !args.values.goal) throw new Error(HELP);
-      if (!isAbsolute(args.values.repo)) throw new Error("--repo must be absolute");
-      const repository = await repositoryRoot(args.values.repo);
-      const candidateId = store.defaultCandidate(repository) ?? store.addCandidate(seedCandidate());
-      campaign = await startCampaign(store, {
-        repository,
-        goal: args.values.goal,
-        candidateId,
-        ...(args.values.base ? { base: args.values.base } : {}),
-        ...(config.constraints ? { constraints: config.constraints } : {}),
-        ...(config.authority ? { authority: config.authority } : {}),
-      });
-      if (config.acceptance) {
-        campaign.acceptance = config.acceptance;
-        store.saveCampaign(campaign);
-      }
-    } else if (command === "resume") {
-      const found = store.getCampaign(args.positionals[1] ?? "");
-      if (!found) throw new Error("Unknown campaign ID");
-      if (["completed", "cancelled"].includes(found.status))
-        throw new Error(`Campaign is ${found.status}; start a new campaign`);
-      if (config.acceptance || config.authority || config.constraints)
-        throw new Error("Resume cannot replace the recorded campaign contract");
-      campaign = found;
-    } else throw new Error(HELP);
-    const token = ownerToken();
-    store.claim(campaign.worktree, token, ownerAlive);
-    const release = () => store.release(campaign.worktree, token);
-    process.once("exit", release);
-    try {
-      campaign.status = "active";
-      campaign.result = null;
-      store.saveCampaign(campaign);
-      await interact(store, campaign, config, args.values.rlm, command === "resume");
-    } finally {
-      process.removeListener("exit", release);
-      release();
-    }
+    } else await own(store, await select(store, command!, id, args.values), command === "resume");
   } finally {
     store.close();
   }
 }
-async function interact(
+async function select(
   store: Store,
-  campaign: Campaign,
-  config: Awaited<ReturnType<typeof loadConfig>>,
-  rlmPackage: string | undefined,
+  command: string,
+  id: string,
+  values: { repo?: string; goal?: string; base?: string; config?: string },
+): Promise<{ campaign: Campaign; config: Config }> {
+  const config = await loadConfig(values.config);
+  if (command === "start") {
+    if (!values.repo || !values.goal) throw new Error(HELP);
+    if (!isAbsolute(values.repo)) throw new Error("--repo must be absolute");
+    const repository = await repositoryRoot(values.repo);
+    const candidateId = store.defaultCandidate(repository) ?? store.addCandidate(seedCandidate());
+    const campaign = await startCampaign(store, {
+      repository,
+      goal: values.goal,
+      candidateId,
+      ...(values.base ? { base: values.base } : {}),
+      ...(config.constraints ? { constraints: config.constraints } : {}),
+      ...(config.authority ? { authority: config.authority } : {}),
+    });
+    if (config.acceptance) {
+      campaign.acceptance = config.acceptance;
+      store.saveCampaign(campaign);
+    }
+    return { campaign, config };
+  }
+  if (command !== "resume") throw new Error(HELP);
+  const found = store.getCampaign(id);
+  if (!found) throw new Error("Unknown campaign ID");
+  if (["completed", "cancelled"].includes(found.status))
+    throw new Error(`Campaign is ${found.status}; start a new campaign`);
+  if (config.acceptance || config.authority || config.constraints)
+    throw new Error("Resume cannot replace the recorded campaign contract");
+  return { campaign: found, config };
+}
+async function own(
+  store: Store,
+  { campaign, config }: { campaign: Campaign; config: Config },
   resume: boolean,
 ): Promise<void> {
-  const learningMessages: string[] = [];
-  const candidate = store.candidate(campaign.candidateId);
-  let scheduler: IdleLearning | undefined;
-  let unsubscribe: (() => void) | undefined;
+  const token = ownerToken();
+  store.claim(campaign.worktree, token, ownerAlive);
+  const release = () => store.release(campaign.worktree, token);
+  process.once("exit", release);
+  try {
+    campaign.status = "active";
+    campaign.result = null;
+    store.saveCampaign(campaign);
+    await drive(store, campaign, config, resume);
+  } finally {
+    process.removeListener("exit", release);
+    release();
+  }
+}
+/** Run the fixed DSPy workflow to a stop, then optional post-campaign learning. */
+async function drive(
+  store: Store,
+  campaign: Campaign,
+  config: Config,
+  resume: boolean,
+): Promise<void> {
+  const herdrPane = process.env.HERDR_ENV === "1" ? process.env.HERDR_PANE_ID : undefined;
   const live = await openCampaign({
     store,
     campaign,
-    candidate,
+    candidate: store.candidate(campaign.candidateId),
     resume,
-    onShutdown: async () => {
-      unsubscribe?.();
-      await scheduler?.close();
-    },
-    ...(rlmPackage ? { rlmPackage: resolve(rlmPackage) } : {}),
-    commands: {
-      async learning() {
-        return JSON.stringify(
-          { messages: learningMessages, experiments: store.experiments(), trials: store.trials() },
-          null,
-          2,
-        );
-      },
-      async approve(id) {
-        store.approve(campaign.repository, id);
-        return `Repository default is now ${id}. This campaign remains pinned to ${campaign.candidateId}.`;
-      },
-    },
+    ...(herdrPane ? { herdrPane } : {}),
+  });
+  const abort = new AbortController();
+  const pause = () => {
+    live.control.pause();
+    abort.abort(new Error("Paused by user; resume explicitly"));
+  };
+  process.once("SIGINT", pause);
+  let last = "";
+  const unsubscribe = live.control.subscribe(() => {
+    const state = `${campaign.status} / ${campaign.stage}`;
+    if (state !== last) console.log(`[campaign ${campaign.id}] ${(last = state)}`);
   });
   try {
-    if (config.allowance) {
-      let cases: EvaluationCase[] = store.cases();
-      if (config.casesFile)
-        cases = (JSON.parse(await readFile(config.casesFile, "utf8")) as unknown[]).map((value) =>
-          validate(CaseSchema, value),
-        );
-      const allowance = config.allowance;
-      scheduler = new IdleLearning(
-        live.control,
-        async (signal) => {
-          const result = await runExperiment({
-            store,
-            repository: campaign.repository,
-            candidate,
-            allowance,
-            cases,
-            campaign,
-            signal,
-            idle: () =>
-              !live.runtime.session.isStreaming &&
-              store
-                .campaigns()
-                .filter((value) => value.repository === campaign.repository)
-                .every((value) => ["completed", "paused", "cancelled"].includes(value.status)),
-            sessionOptions: rlmPackage ? { rlmPackage: resolve(rlmPackage) } : {},
-            async reflect(prompt, reflectionSignal) {
-              const model = live.runtime.session.model;
-              if (!model) throw new Error("Reflection model unavailable");
-              const response = await live.runtime.services.modelRuntime.completeSimple(
-                model,
-                {
-                  messages: [
-                    {
-                      role: "user",
-                      content: typeof prompt === "string" ? prompt : JSON.stringify(prompt),
-                      timestamp: Date.now(),
-                    },
-                  ],
-                },
-                { signal: reflectionSignal },
-              );
-              if (response.stopReason !== "stop")
-                throw new Error(response.errorMessage ?? "GEPA reflection failed");
-              return {
-                text: response.content
-                  .map((part) => (part.type === "text" ? part.text : ""))
-                  .join(""),
-              };
-            },
-          });
-          learningMessages.push(JSON.stringify(result));
-        },
-        (error) => learningMessages.push(String(error)),
-        () => !live.runtime.session.isStreaming,
-      );
-      unsubscribe = live.runtime.session.subscribe((event) => {
-        if (event.type === "agent_settled") scheduler?.update();
-      });
-    }
-    await new InteractiveMode(live.runtime, { initialMessage: live.initialMessage }).run();
+    console.log(live.control.brief());
+    await live.run(abort.signal);
+    console.log(`Campaign ${campaign.status}.\n${campaign.result ?? ""}`.trimEnd());
+    if (campaign.status === "completed" && config.allowance)
+      console.log(JSON.stringify(await learn(store, live, campaign, config, abort.signal)));
   } finally {
-    unsubscribe?.();
-    await scheduler?.close();
+    process.removeListener("SIGINT", pause);
+    unsubscribe();
     await live.close();
   }
+}
+async function learn(
+  store: Store,
+  live: CampaignSession,
+  campaign: Campaign,
+  config: Config,
+  signal: AbortSignal,
+): Promise<unknown> {
+  let cases: EvaluationCase[] = store.cases();
+  if (config.casesFile)
+    cases = (JSON.parse(await readFile(config.casesFile, "utf8")) as unknown[]).map((value) =>
+      validate(CaseSchema, value),
+    );
+  return runExperiment({
+    store,
+    repository: campaign.repository,
+    candidate: store.candidate(campaign.candidateId),
+    allowance: config.allowance!,
+    cases,
+    campaign,
+    signal,
+    idle: () =>
+      store
+        .campaigns()
+        .filter((value) => value.repository === campaign.repository)
+        .every((value) => ["completed", "paused", "cancelled"].includes(value.status)),
+    async reflect(prompt, reflectionSignal) {
+      const response = await live.services.modelRuntime.completeSimple(
+        live.model,
+        {
+          messages: [
+            {
+              role: "user",
+              content: typeof prompt === "string" ? prompt : JSON.stringify(prompt),
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        { signal: reflectionSignal },
+      );
+      if (response.stopReason !== "stop")
+        throw new Error(response.errorMessage ?? "GEPA reflection failed");
+      return {
+        text: response.content.map((part) => (part.type === "text" ? part.text : "")).join(""),
+      };
+    },
+  });
 }

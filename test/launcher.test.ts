@@ -1,11 +1,12 @@
-import { mkdir, mkdtemp, readFile, writeFile, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { CampaignControl } from "../src/campaign/control.js";
-import { seedCandidate } from "../src/runtime/dispatcher.js";
+import { UsageLedger } from "../src/runtime/accounting.js";
+import { seedCandidate } from "../src/runtime/policy.js";
 import { Store } from "../src/state/store.js";
-import { fixture, assistant, review } from "./helpers.js";
+import { fixture, assistant, model, review } from "./helpers.js";
 
 const mocks = vi.hoisted(() => ({
   open: vi.fn(),
@@ -16,20 +17,13 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../src/runtime/session.js", () => ({ openCampaign: mocks.open }));
 vi.mock("../src/learning/experiment.js", () => ({ runExperiment: mocks.experiment }));
 vi.mock("../src/learning/historical.js", () => ({ bootstrap: mocks.bootstrap }));
-vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@earendil-works/pi-coding-agent")>()),
-  InteractiveMode: class {
-    async run() {
-      await mocks.run();
-    }
-  },
-}));
 import { loadConfig } from "../src/launcher/config.js";
 import { launch } from "../src/launcher/launch.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   mocks.open.mockReset();
   mocks.run.mockReset();
   mocks.experiment.mockReset();
@@ -39,22 +33,22 @@ afterEach(async () => {
 async function setup() {
   const f = await fixture();
   cleanups.push(() => f.close());
+  vi.stubEnv("HERDR_ENV", undefined);
   const state = join(f.root, "launcher", "state.sqlite");
   const completeSimple = vi.fn(async () => assistant("proposal"));
   mocks.open.mockImplementation(async (options) => {
     const control = new CampaignControl(
       options.store,
       options.campaign,
-      { workflow: async () => review, acceptance: async () => review },
+      async () => review,
       join(f.root, "artifacts"),
     );
     return {
       control,
-      runtime: {
-        session: { model: { id: "fake" }, subscribe: () => () => {} },
-        services: { modelRuntime: { completeSimple } },
-      },
-      initialMessage: "start",
+      services: { modelRuntime: { completeSimple } },
+      model,
+      ledger: new UsageLedger(),
+      run: mocks.run,
       close: vi.fn(async () => control.pause()),
     };
   });
@@ -87,6 +81,7 @@ it("shows help, validates arguments, prints status and bootstraps explicit repos
     ["start"],
     ["start", "--repo", ".", "--goal", "x"],
     ["resume", "unknown"],
+    ["approve", "id"],
     ["bootstrap"],
   ])
     await expect(launch([...args, ...f.args])).rejects.toThrow();
@@ -95,7 +90,7 @@ it("shows help, validates arguments, prints status and bootstraps explicit repos
   expect(mocks.bootstrap).toHaveBeenCalled();
   await launch(["status", ...f.args]);
 });
-it("launches committed worktree with explicit contract and provides human-only approval", async () => {
+it("launches a committed worktree with an explicit contract and human-only approval", async () => {
   const f = await setup();
   const config = join(f.root, "config.json");
   await writeFile(
@@ -105,16 +100,10 @@ it("launches committed worktree with explicit contract and provides human-only a
       acceptance: { criteria: ["Goal"], commands: ["true"] },
       constraints: ["Only local edits"],
       authority: f.campaign.authority,
+      allowance: { maxTrials: 1, trialDeadlineMs: 1000, concurrency: 1, maxModelCalls: 1 },
     }),
   );
-  mocks.run.mockImplementation(async () => {
-    const options = mocks.open.mock.calls.at(-1)![0];
-    const learned = seedCandidate();
-    learned.stages.plan.instructions = "New default";
-    const learnedId = options.store.addCandidate(learned);
-    expect(await options.commands.approve(learnedId)).toContain("remains pinned");
-    expect(await options.commands.learning()).toContain("trials");
-  });
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
   await launch([
     "start",
     "--repo",
@@ -125,23 +114,32 @@ it("launches committed worktree with explicit contract and provides human-only a
     "HEAD",
     "--config",
     config,
-    "--rlm",
-    "/tmp/rlm",
     ...f.args,
   ]);
+  expect(mocks.run).toHaveBeenCalledOnce();
+  expect(mocks.open.mock.calls[0]![0]).toMatchObject({ resume: false });
+  expect("herdrPane" in mocks.open.mock.calls[0]![0]).toBe(false);
+  expect(log).toHaveBeenCalledWith("Campaign active.");
+  expect(mocks.experiment).not.toHaveBeenCalled();
   const db = new Store(f.state);
-  try {
-    const campaign = db.campaigns()[0]!;
-    expect(campaign.authority.merge).toBe(false);
-    expect(campaign.acceptance?.commands).toEqual(["true"]);
-    expect(campaign.status).toBe("paused");
-    expect(db.defaultCandidate(f.repository)).not.toBe(campaign.candidateId);
-  } finally {
-    db.close();
-  }
-  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  const campaign = db.campaigns()[0]!;
+  const learned = seedCandidate();
+  learned.stages.plan.instructions = "New default";
+  const learnedId = db.addCandidate(learned);
+  db.close();
+  expect(campaign.authority.merge).toBe(false);
+  expect(campaign.acceptance?.commands).toEqual(["true"]);
+  expect(campaign.status).toBe("paused");
+  await launch(["approve", learnedId, "--repo", f.repository, ...f.args]);
+  expect(log).toHaveBeenCalledWith(expect.stringContaining("remain pinned"));
+  await launch(["learning", ...f.args]);
+  expect(log).toHaveBeenCalledWith(expect.stringContaining("trials"));
   await launch(["status", ...f.args]);
   expect(log).toHaveBeenCalledWith(expect.stringContaining('"evidenceCurrent":false'));
+  const reopened = new Store(f.state);
+  expect(reopened.defaultCandidate(f.repository)).toBe(learnedId);
+  expect(reopened.campaigns()[0]!.candidateId).not.toBe(learnedId);
+  reopened.close();
 });
 it.each(["root", "subdirectory", "symlink"])(
   "selects the approved candidate using canonical repository identity from %s",
@@ -166,6 +164,13 @@ it.each(["root", "subdirectory", "symlink"])(
     });
   },
 );
+it("runs stages in Herdr panes beside the launcher only inside Herdr", async () => {
+  const f = await setup();
+  vi.stubEnv("HERDR_ENV", "1");
+  vi.stubEnv("HERDR_PANE_ID", "w1:p7");
+  await launch(["start", "--repo", f.repository, "--goal", "Goal", ...f.args]);
+  expect(mocks.open.mock.calls.at(-1)![0].herdrPane).toBe("w1:p7");
+});
 it("resumes explicitly and rejects contract replacement and terminal campaigns", async () => {
   const f = await setup();
   await launch(["start", "--repo", f.repository, "--goal", "Goal", ...f.args]);
@@ -188,7 +193,7 @@ it("resumes explicitly and rejects contract replacement and terminal campaigns",
   terminal.close();
   await expect(launch(["resume", campaign.id, ...f.args])).rejects.toThrow("start a new");
 });
-it("starts bounded learning only on idle and reports model reflection and results", async () => {
+it("learns after a completed campaign within the allowance using Pi model reflection", async () => {
   const f = await setup();
   const config = join(f.root, "learning.json");
   const casesFile = join(f.root, "cases.json");
@@ -203,6 +208,7 @@ it("starts bounded learning only on idle and reports model reflection and result
   );
   mocks.experiment.mockImplementation(async (options) => {
     expect(options.idle()).toBe(true);
+    expect(options.cases).toEqual([]);
     expect(await options.reflect("reflect", new AbortController().signal)).toEqual({
       text: "proposal",
     });
@@ -213,14 +219,18 @@ it("starts bounded learning only on idle and reports model reflection and result
   });
   mocks.run.mockImplementation(async () => {
     const live = await mocks.open.mock.results.at(-1)!.value;
-    live.control.pause();
-    await new Promise((resolve) => setImmediate(resolve));
-    expect(mocks.experiment).not.toHaveBeenCalled();
     live.control.campaign.status = "completed";
+    live.control.campaign.result = "Shipped";
     live.control.changed();
-    await vi.waitFor(() => expect(mocks.experiment).toHaveBeenCalled());
   });
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
   await launch(["start", "--repo", f.repository, "--goal", "Goal", "--config", config, ...f.args]);
   expect(f.completeSimple).toHaveBeenCalledTimes(2);
-  expect(await readFile(config, "utf8")).toContain("maxTrials");
+  expect(log).toHaveBeenCalledWith(expect.stringContaining('"candidates":["learned"]'));
+  expect(log).toHaveBeenCalledWith("Campaign completed.\nShipped");
+  f.completeSimple.mockResolvedValueOnce({ ...assistant(""), stopReason: "error" });
+  const options = mocks.experiment.mock.calls[0]![0];
+  await expect(options.reflect("again", new AbortController().signal)).rejects.toThrow(
+    "GEPA reflection failed",
+  );
 });

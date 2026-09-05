@@ -1,24 +1,38 @@
-from typing import Any, Literal
+"""Fixed shipping-campaign workflow declared as one DSPy module.
+
+Every stage is one fresh Pi session: the host opens it, Pi runs its own tools, and the
+final assistant message is the LM response that DSPy parses into the stage's typed output.
+The host owns state, stage order, checks, the independent evaluator, authority, and completion.
+"""
+
+from typing import Literal
 
 import dspy
 from dspy.core.types import LMOutput, LMRequest, LMResponse, LMTextPart
-from pydantic import BaseModel, ConfigDict, Field
+from dspy.utils.exceptions import AdapterParseError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 STAGES = ("plan", "implement", "review", "fix")
-INPUTS = ("inheritedInstructions", "brief", "context", "tools")
+REVIEW_INPUTS = ("inheritedInstructions", "brief", "evidence")
+REPAIR_PROMPT = (
+    "Your previous reply did not contain the required JSON object. "
+    "Reply with only that JSON object, following the field structure from the instructions."
+)
 
 
-class ToolCall(BaseModel):
+class Plan(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    id: str
-    name: str
-    arguments: dict[str, Any]
+    plan: str
+    criteria: list[str]
+    commands: list[str]
+    blocker: str = ""
 
 
-class Action(BaseModel):
+class Report(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    text: str
-    toolCalls: list[ToolCall]
+    summary: str
+    notes: list[str]
+    blocker: str = ""
 
 
 class Review(BaseModel):
@@ -30,48 +44,73 @@ class Review(BaseModel):
     findings: str
 
 
-class NextAction(dspy.Signature):
-    """Choose an action in the host's current stage, never a new workflow or authority."""
+class PlanStage(dspy.Signature):
+    """Inspect the repository in a fresh read-only Pi session and return one complete plan."""
 
     inheritedInstructions: str = dspy.InputField()
     brief: str = dspy.InputField()
-    context: str = dspy.InputField()
-    tools: str = dspy.InputField()
-    action: Action = dspy.OutputField()
+    plan: Plan = dspy.OutputField()
 
 
-class ReviewChange(dspy.Signature):
-    """Review the complete change in clean context without tools or author conversation."""
+class WorkStage(dspy.Signature):
+    """Do this stage's work in a fresh Pi session, then report it for the next stage."""
 
     inheritedInstructions: str = dspy.InputField()
     brief: str = dspy.InputField()
-    context: str = dspy.InputField()
-    tools: str = dspy.InputField()
+    report: Report = dspy.OutputField()
+
+
+class ReviewStage(dspy.Signature):
+    """Review the whole change in a fresh read-only Pi session without the author's conversation."""
+
+    inheritedInstructions: str = dspy.InputField()
+    brief: str = dspy.InputField()
+    evidence: str = dspy.InputField()
     review: Review = dspy.OutputField()
 
 
-class PiLM(dspy.BaseLM):
+OUTPUTS = {"plan": "plan", "implement": "report", "review": "review", "fix": "report"}
+
+
+class PiSessionLM(dspy.BaseLM):
+    """One fresh Pi session per stage; the host runs it and returns the final assistant text."""
+
     forward_contract = "typed_lm"
 
-    def __init__(self, exchange):
-        super().__init__(model="pi/campaign", cache=False, num_retries=0)
-        self.exchange = exchange
+    def __init__(self, host, stage):
+        super().__init__(model=f"pi/{stage}", cache=False, num_retries=0)
+        self.host = host
+        self.stage = stage
+        self.repair = False
 
     def forward(self, request: LMRequest) -> LMResponse:
-        messages = []
-        for message in request.messages:
-            if any(not isinstance(part, LMTextPart) for part in message.parts):
-                raise ValueError("Campaigns support text inputs only")
-            messages.append(
-                {"role": message.role, "content": "".join(p.text for p in message.parts)}
-            )
-        response = self.exchange("model", {"messages": messages})
+        # In repair mode the DSPy request is ignored: the open session is asked once more for
+        # the JSON object instead of being re-prompted with the full stage inputs.
+        if self.repair:
+            payload = {"fresh": False, "prompt": REPAIR_PROMPT}
+        else:
+            messages = [(message.role, text(message)) for message in request.messages]
+            *context, (role, prompt) = messages
+            if role != "user":
+                raise ValueError("A stage prompt must end with a user message")
+            # Pi keeps its own system prompt; DSPy's system text and demonstrations lead the
+            # single user prompt of the fresh session.
+            preamble = [
+                content if role == "system" else f"Example {role} message:\n{content}"
+                for role, content in context
+            ]
+            payload = {"fresh": True, "prompt": "\n\n".join([*preamble, prompt])}
+        response = self.host("session", payload)
         return LMResponse(
             model=self.model,
             outputs=[LMOutput(parts=[LMTextPart(text=response["text"])], finish_reason="stop")],
-            usage=response.get("usage"),
-            cost=response.get("cost"),
         )
+
+
+def text(message):
+    if any(not isinstance(part, LMTextPart) for part in message.parts):
+        raise ValueError("Campaigns support text inputs only")
+    return "".join(part.text for part in message.parts)
 
 
 def predictor(policy, signature, output, output_type):
@@ -79,36 +118,52 @@ def predictor(policy, signature, output, output_type):
     result.demos = [
         dspy.Example(
             **demo["input"], **{output: output_type.model_validate(demo[output])}
-        ).with_inputs(*INPUTS)
-        for demo in policy["demonstrations"]
+        ).with_inputs(*signature.input_fields)
+        for demo in policy.get("demonstrations", [])
     ]
     return result
 
 
-class CampaignProgram(dspy.Module):
-    """Declare plan -> implement -> review -> fix -> review; Pi executes and persists it.
+class ShippingCampaign(dspy.Module):
+    """plan -> implement -> review -> (fix -> review)* until the host accepts.
 
-    Each forward call advances one stage action. Tool results return through Pi, not
-    a second Python execution loop. Only the host can finish a stage or the campaign.
+    `forward` runs the host's recorded stage until the campaign leaves `active`. The host owns
+    the stage order; GEPA edits only stage instructions and review demonstrations. Only the
+    host completes or blocks.
     """
 
-    def __init__(self, candidate):
+    def __init__(self, candidate, host):
         super().__init__()
         stages = candidate["stages"]
-        self.plan = predictor(stages["plan"], NextAction, "action", Action)
-        self.implement = predictor(stages["implement"], NextAction, "action", Action)
-        self.review = predictor(stages["review"], ReviewChange, "review", Review)
-        self.fix = predictor(stages["fix"], NextAction, "action", Action)
+        self.plan = predictor(stages["plan"], PlanStage, "plan", Plan)
+        self.implement = predictor(stages["implement"], WorkStage, "report", Report)
+        self.review = predictor(stages["review"], ReviewStage, "review", Review)
+        self.fix = predictor(stages["fix"], WorkStage, "report", Report)
+        self.host = host
 
-    def forward(self, stage, **inputs):
-        if stage not in STAGES:
-            raise ValueError(f"Unknown workflow stage: {stage}")
-        return getattr(self, stage)(**inputs)
+    def forward(self):
+        state = self.host("status", {})
+        while state["status"] == "active":
+            state = self.step(state["stage"])
+        return state
+
+    def step(self, name):
+        inputs = self.host("inputs", {})
+        if inputs["status"] != "active":
+            return inputs
+        predictor = getattr(self, name)
+        fields = {key: inputs[key] for key in predictor.signature.input_fields}
+        lm = PiSessionLM(self.host, name)
+        with dspy.context(lm=lm, adapter=dspy.JSONAdapter(use_native_function_calling=False)):
+            try:
+                prediction = predictor(**fields)
+            except (AdapterParseError, ValidationError):
+                # One repair turn in the same session keeps the stage's context and isolation.
+                lm.repair = True
+                prediction = predictor(**fields)
+        output = getattr(prediction, OUTPUTS[name]).model_dump()
+        return self.host("record", {"input": fields, "output": output, "trace": lm.history})
 
 
-def decide(candidate, stage, inputs, exchange):
-    lm = PiLM(exchange)
-    with dspy.context(lm=lm, adapter=dspy.JSONAdapter(use_native_function_calling=False)):
-        prediction = CampaignProgram(candidate)(stage=stage, **inputs)
-    output = "review" if stage == "review" else "action"
-    return {output: getattr(prediction, output).model_dump(), "trace": lm.history}
+def campaign(candidate, host):
+    return ShippingCampaign(candidate, host).forward()

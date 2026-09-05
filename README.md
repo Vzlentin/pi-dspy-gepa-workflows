@@ -1,30 +1,45 @@
 # Pi DSPy/GEPA campaigns
 
-Continuous coding campaigns in Pi's existing terminal UI. A fixed DSPy workflow follows **plan → implement → review → fix → review**, with Pi executing tools and owning the transcript. After verified completion, explicitly budgeted GEPA experiments can improve each stage's instructions and demonstrations for future campaigns. Stage order, authority, acceptance checks, and the independent evaluator stay fixed. Candidate promotion is a human command.
+Coding campaigns declared as one DSPy module. `ShippingCampaign.forward()` in
+`python/pi_dspy_gepa/program.py` is the workflow: **plan → implement → review → fix → review** until
+the host accepts. Every stage is one fresh Pi session: Pi runs its own tools in the campaign
+worktree, and the final assistant message is the LM response DSPy parses into that stage's typed
+output. The TypeScript host owns state, checks, the independent evaluator, authority, and completion.
+After verified completion, explicitly budgeted GEPA experiments can improve stage instructions and
+review demonstrations for future campaigns. Stage order, tools, authority, acceptance checks, and
+the evaluator stay fixed. Candidate promotion is a human command.
 
-This package is alpha. It replaces the previous workflow engine, controllers, standalone viewers, and workflow catalog in place.
+This package is alpha. It replaces the previous per-action dispatcher, RLM integration, and
+interactive Pi controls in place.
 
 ## Setup
 
-Use Node 22.18 or newer, Git, and uv. Install and configure Pi 0.84.4 and the existing `pi-ipython-rlm` package. Its IPython environment must be available; the RLM package provides its own provisioning instructions.
+Use Node 22.19 or newer, Git, uv, and Pi 0.85.0 (for Herdr panes, `pi` on `PATH`).
 
 ```sh
 npm ci
 uv sync --frozen
 npm run build
-node dist/launcher/cli.js start --repo /absolute/path/to/repository --goal 'Implement the requested change' --rlm /absolute/path/to/pi-ipython-rlm
+node dist/launcher/cli.js start --repo /absolute/path/to/repository --goal 'Implement the requested change'
 ```
 
-The installed executable is `campaign`. Omit `--rlm` when Pi's configured packages already identify the installed RLM extension.
+The installed executable is `campaign`.
 
 ```sh
-campaign start --repo /absolute/path/to/repository --goal 'Implement the requested change'
+campaign start --repo /absolute/path/to/repository --goal 'Implement the requested change' [--base ref] [--config file]
 campaign resume CAMPAIGN_ID
 campaign status
+campaign learning
+campaign approve CANDIDATE_ID --repo /absolute/path/to/repository
 ```
 
-The default is verified local changes in a dedicated worktree based on committed `HEAD`. Uncommitted source changes are not copied. Commits, pushes, pull requests, merges, releases, and deployments require explicit authority in a launch configuration. Exit stops execution; resume is explicit.
+Inside Herdr (`HERDR_ENV=1`), each stage starts a visible `pi` agent in a new pane beside the
+launcher; you can watch and steer the live session. Elsewhere, stages run headlessly through the Pi
+SDK pinned with this package (0.85.0). Ctrl-C pauses after the current stage; resume is explicit.
 
-Inside Pi, steer conversationally or use `/campaign status`, `/campaign pause`, `/campaign continue`, `/campaign abort`, `/campaign learning`, and `/campaign approve CANDIDATE_ID`. The agent's campaign tool cannot approve candidates.
+The default is verified local changes in a dedicated worktree based on committed `HEAD`. Commits,
+pushes, pull requests, merges, releases, and deployments require explicit authority in a launch
+configuration.
 
-See [campaign behavior and configuration](docs/workflows.md), [state storage](docs/SQLITE_STATE.md), and [development and evaluation](docs/development.md).
+See [campaign behavior and configuration](docs/workflows.md), [state storage](docs/SQLITE_STATE.md),
+and [development and evaluation](docs/development.md).

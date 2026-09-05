@@ -128,7 +128,14 @@ export class Store {
     return id;
   }
   candidate(id: string): Candidate {
-    const value = validate(CandidateSchema, this.get("candidates", id));
+    let value: Candidate;
+    try {
+      value = validate(CandidateSchema, this.get("candidates", id));
+    } catch (cause) {
+      throw new Error(`Candidate is incompatible with this runtime. ${RESET_INSTRUCTION}`, {
+        cause,
+      });
+    }
     if (candidateId(value) !== id) throw new Error("Candidate content digest mismatch");
     return value;
   }

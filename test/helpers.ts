@@ -10,9 +10,11 @@ import {
 import { CampaignControl } from "../src/campaign/control.js";
 import { git } from "../src/campaign/process.js";
 import { startCampaign } from "../src/campaign/workspace.js";
-import { seedCandidate, zeroUsage, type Stream } from "../src/runtime/dispatcher.js";
+import { zeroUsage } from "../src/runtime/accounting.js";
+import { seedCandidate } from "../src/runtime/policy.js";
 import type { Worker, Exchange } from "../src/runtime/python.js";
-import type { Action, Review } from "../src/state/contracts.js";
+import type { StagePrompt, StageSessions } from "../src/runtime/sessions.js";
+import type { Review, Stage } from "../src/state/contracts.js";
 import { Store } from "../src/state/store.js";
 
 export const review: Review = {
@@ -22,6 +24,9 @@ export const review: Review = {
   maintainability: true,
   findings: "All criteria met without unnecessary complexity.",
 };
+export const acceptance = { criteria: ["Source is finished"], commands: ["true"] };
+export const plan = { plan: "Change source and verify it.", ...acceptance, blocker: "" };
+export const report = { summary: "Did the stage work.", notes: [], blocker: "" };
 export const model: Model<Api> = {
   id: "fake",
   name: "fake",
@@ -34,51 +39,94 @@ export const model: Model<Api> = {
   contextWindow: 128000,
   maxTokens: 4096,
 };
-export function assistant(text: string): AssistantMessage {
+export function assistant(
+  text: string,
+  content: AssistantMessage["content"] = [{ type: "text", text }],
+): AssistantMessage {
   return {
     role: "assistant",
-    content: [{ type: "text", text }],
+    content,
     api: model.api,
     provider: model.provider,
     model: model.id,
     usage: zeroUsage(),
-    stopReason: "stop",
+    stopReason: content.some((part) => part.type === "toolCall") ? "toolUse" : "stop",
     timestamp: Date.now(),
   };
 }
-export function fakeStream(response: AssistantMessage = assistant("fake summary")): Stream {
-  return () => {
-    const stream = createAssistantMessageEventStream();
-    stream.push({ type: "done", reason: "stop", message: response });
-    stream.end(response);
-    return stream;
-  };
+export function fakeStream(response: AssistantMessage) {
+  const stream = createAssistantMessageEventStream();
+  stream.push({
+    type: "done",
+    reason: response.stopReason as "stop" | "toolUse",
+    message: response,
+  });
+  stream.end(response);
+  return stream;
 }
+type Script = (payload: unknown, exchange: Exchange, signal: AbortSignal) => Promise<unknown>;
 export class FakeWorker implements Worker {
   calls: unknown[] = [];
   closed = false;
-  constructor(
-    readonly actions: (
-      | Action
-      | Error
-      | ((payload: unknown, exchange: Exchange, signal: AbortSignal) => Promise<unknown>)
-    )[],
-  ) {}
+  constructor(readonly scripts: (Script | Error)[]) {}
   async request(payload: unknown, exchange: Exchange, signal: AbortSignal): Promise<unknown> {
     this.calls.push(payload);
     signal.throwIfAborted();
-    const action = this.actions.shift();
-    if (!action) throw new Error("Fake DSPy script exhausted");
-    if (action instanceof Error) throw action;
-    if (typeof action === "function") return action(payload, exchange, signal);
-    return { action, trace: [] };
+    const script = this.scripts.shift();
+    if (!script) throw new Error("Fake worker script exhausted");
+    if (script instanceof Error) throw script;
+    return script(payload, exchange, signal);
   }
   async close() {
     this.closed = true;
   }
 }
-export function call(name: string, args: Record<string, unknown>, id = "call"): Action {
-  return { text: "", toolCalls: [{ id, name, arguments: args }] };
+type State = { status: string; stage: Stage };
+/** The DSPy workflow's host protocol without Python: same order, sessions, one repair turn. */
+export const program: Script = async (_payload, exchange, signal) => {
+  let state = (await exchange("status", {}, signal)) as State;
+  while (state.status === "active") {
+    const stage = state.stage;
+    const inputs = (await exchange("inputs", {}, signal)) as State & Record<string, string>;
+    if (inputs.status !== "active") return inputs;
+    const session = (fresh: boolean, prompt: string) =>
+      exchange("session", { fresh, prompt }, signal) as Promise<{ text: string }>;
+    let text = (
+      await session(true, `Stage ${stage} system\n\n${inputs.brief}\n\n${inputs.evidence ?? ""}`)
+    ).text;
+    let output: unknown;
+    try {
+      output = JSON.parse(text);
+    } catch {
+      text = (await session(false, "Reply with only the JSON object.")).text;
+      output = JSON.parse(text);
+    }
+    const { status: _status, stage: _stage, ...input } = inputs;
+    state = (await exchange("record", { input, output, trace: [] }, signal)) as State;
+  }
+  return state;
+};
+type Reply = string | object | ((request: StagePrompt) => unknown);
+/** Stage sessions answered from a per-stage script; non-string replies are sent as JSON. */
+export function fakeSessions(replies: Partial<Record<Stage, Reply[]>>) {
+  const requests: StagePrompt[] = [];
+  const sessions: StageSessions & { requests: StagePrompt[]; closed: number } = {
+    requests,
+    closed: 0,
+    async prompt(request, signal) {
+      signal.throwIfAborted();
+      requests.push(request);
+      const queue = replies[request.stage] ?? [];
+      if (!queue.length) throw new Error(`Fake session script exhausted for ${request.stage}`);
+      let reply = queue.shift();
+      if (typeof reply === "function") reply = await reply(request);
+      return { text: typeof reply === "string" ? reply : JSON.stringify(reply) };
+    },
+    async close() {
+      sessions.closed++;
+    },
+  };
+  return sessions;
 }
 export async function fixture(candidate = seedCandidate()) {
   const root = await mkdtemp(join(tmpdir(), "campaign-test-"));
@@ -98,12 +146,7 @@ export async function fixture(candidate = seedCandidate()) {
     goal: "Change source to finished",
     candidateId,
   });
-  const control = new CampaignControl(
-    store,
-    campaign,
-    { workflow: async () => review, acceptance: async () => review },
-    join(root, "artifacts"),
-  );
+  const control = new CampaignControl(store, campaign, async () => review, join(root, "artifacts"));
   return {
     root,
     repository,

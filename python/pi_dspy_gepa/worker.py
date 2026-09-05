@@ -1,4 +1,4 @@
-"""Persistent NDJSON worker. No code loading, execution loop, or operation replay."""
+"""Persistent NDJSON worker. No code loading, tool execution, or operation replay."""
 
 import contextlib
 import json
@@ -6,7 +6,7 @@ import sys
 import traceback
 
 from .learning import learn
-from .program import decide
+from .program import campaign
 
 
 def serve(reader, writer):
@@ -28,10 +28,8 @@ def serve(reader, writer):
         try:
             request = json.loads(line)
             with contextlib.redirect_stdout(sys.stderr):
-                if request["operation"] == "decide":
-                    result = decide(
-                        request["candidate"], request["stage"], request["input"], exchange
-                    )
+                if request["operation"] == "campaign":
+                    result = campaign(request["candidate"], exchange)
                 elif request["operation"] == "learn":
                     result = learn(request, exchange)
                 else:

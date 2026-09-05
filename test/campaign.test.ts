@@ -13,7 +13,7 @@ import {
 } from "../src/campaign/workspace.js";
 import { CandidateSchema, validate, candidateId, digest } from "../src/state/contracts.js";
 import { Store, statePath } from "../src/state/store.js";
-import { fixture, review } from "./helpers.js";
+import { fixture, plan, report, review } from "./helpers.js";
 
 const fixtures: Awaited<ReturnType<typeof fixture>>[] = [];
 async function setup() {
@@ -117,6 +117,20 @@ describe("campaign state and contracts", () => {
     expect(() => f.store.approve(f.repository, foreign)).toThrow("one repository");
     expect(() => f.store.finishExperiment("unknown", {})).toThrow("Unknown experiment");
   });
+  it("rejects a candidate from the old Pi runtime with reset guidance and preserves its data", async () => {
+    const f = await setup();
+    const previous = JSON.stringify({
+      ...f.candidate,
+      provenance: { ...f.candidate.provenance, pi: "0.84.4" },
+    });
+    f.store.db
+      .prepare("UPDATE candidates SET data=? WHERE id=?")
+      .run(previous, f.campaign.candidateId);
+    expect(() => f.store.candidate(f.campaign.candidateId)).toThrow("Back up and move");
+    expect(
+      f.store.db.prepare("SELECT data FROM candidates WHERE id=?").get(f.campaign.candidateId),
+    ).toEqual({ data: previous });
+  });
   it("opens compatible state and rejects old alpha state without writing it", async () => {
     const f = await setup();
     const second = new Store(f.store.filePath);
@@ -160,6 +174,38 @@ describe("campaign state and contracts", () => {
   });
 });
 describe("completion and content fingerprints", () => {
+  it("keeps full multiline verification evidence readable in the campaign brief", async () => {
+    const f = await setup();
+    f.campaign.evidence = {
+      schema: "pi-dspy-gepa.evidence.v1",
+      fingerprint: "fingerprint",
+      passed: false,
+      artifactPath: join(f.root, "evidence.json"),
+      error: "First error line\nSecond error line",
+      checks: [
+        {
+          command: "echo first\necho second",
+          exitCode: null,
+          outputPath: join(f.root, "check.log"),
+        },
+      ],
+      workflowReview: { ...review, findings: "First finding\nSecond finding" },
+      review: null,
+    };
+    f.campaign.result = "First blocker line\nSecond blocker line";
+    const brief = f.control.brief();
+    for (const text of [
+      f.campaign.evidence.error,
+      f.campaign.evidence.workflowReview!.findings,
+      f.campaign.evidence.checks[0]!.command,
+      f.campaign.evidence.checks[0]!.outputPath,
+      f.campaign.result,
+    ])
+      expect(brief).toContain(text);
+    expect(brief).toContain("Exit code: Unavailable");
+    expect(brief).toContain("### Independent acceptance\nNot available.");
+    expect(brief).not.toContain("\\n");
+  });
   it("reviews authorized committed changes against the campaign base", async () => {
     const f = await setup();
     await writeFile(join(f.campaign.worktree, "source.txt"), "finished");
@@ -177,38 +223,44 @@ describe("completion and content fingerprints", () => {
     const result = await verify(
       f.campaign,
       join(f.root, "review-committed"),
-      {
-        workflow: async () => review,
-        acceptance: async (input) => {
-          diff = input.diff;
-          return review;
-        },
+      async (input) => {
+        diff = input.diff;
+        return review;
       },
       new AbortController().signal,
     );
-    expect(result.passed).toBe(true);
+    // Only the host's review stage record can pass evidence.
+    expect(result).toMatchObject({ passed: false, error: null, review });
     expect(diff).toContain("+finished");
   });
   it("requires complete immutable acceptance and host evidence", async () => {
     const f = await setup();
     const signal = new AbortController().signal;
-    const missing = await verify(f.campaign, join(f.root, "checks"), f.control.reviewers, signal);
+    const missing = await verify(f.campaign, join(f.root, "checks"), f.control.evaluator, signal);
     expect(missing.passed).toBe(false);
     expect(missing.error).toContain("Record acceptance");
-    await f.control.action(
-      {
-        action: "plan",
-        text: "Inspect source, implement the goal, and run checks.",
-        acceptance: { criteria: ["Finished"], commands: ["printf full-output"] },
-      },
-      signal,
-    );
-    await expect(f.control.action({ action: "plan", acceptance: {} }, signal)).rejects.toThrow(
-      "already recorded",
-    );
-    const result = await f.control.action({ action: "review" }, signal);
-    expect(result).toMatchObject({ passed: true });
-    expect(f.campaign.status).toBe("completed");
+    f.campaign.stage = "review";
+    await expect(f.control.begin(signal)).rejects.toThrow("Record the plan");
+    f.campaign.stage = "plan";
+    await f.control.begin(signal);
+    await expect(f.control.record({ ...plan, plan: " " })).rejects.toThrow("complete plan");
+    await expect(f.control.record({ text: "Do work" })).rejects.toThrow("Invalid structured");
+    await f.control.record({ ...plan, commands: ["printf full-output"] });
+    expect(f.campaign.stage).toBe("implement");
+    f.campaign.stage = "plan";
+    await expect(f.control.record(plan)).rejects.toThrow("already recorded");
+    expect(() => f.store.saveCampaign({ ...f.campaign, plan: "Changed" })).toThrow("immutable");
+    f.campaign.stage = "implement";
+    await f.control.begin(signal);
+    await f.control.record(report);
+    await expect(f.control.record(review)).rejects.toThrow("Review requires verification evidence");
+    const inputs = await f.control.begin(signal);
+    expect(inputs.evidence).toContain("## Check: printf full-output\nExit code: 0");
+    expect(inputs.evidence).toContain("full-output");
+    expect(inputs.evidence).toContain(`## Complete diff against ${f.campaign.baseCommit}`);
+    expect(await f.control.record(review)).toEqual({ status: "completed", stage: "review" });
+    expect(f.campaign.result).toBe(review.findings);
+    expect(f.campaign.evidence).toMatchObject({ passed: true, workflowReview: review, review });
     expect(await evidenceCurrent(f.campaign)).toBe(true);
     expect(await readFile(f.campaign.evidence!.checks[0]!.outputPath, "utf8")).toBe("full-output");
     await writeFile(join(f.campaign.worktree, "source.txt"), "later edit");
@@ -240,17 +292,18 @@ describe("completion and content fingerprints", () => {
     const evidence = await verify(
       f.campaign,
       join(f.root, "verify"),
-      {
-        workflow: async () => review,
-        acceptance: async () => {
-          if (kind === "mutating-review")
-            await writeFile(join(f.campaign.worktree, "source.txt"), "changed");
-          return kind === "malformed" ? {} : { ...review, correctness: kind !== "review-fail" };
-        },
+      async () => {
+        if (kind === "mutating-review")
+          await writeFile(join(f.campaign.worktree, "source.txt"), "changed");
+        return kind === "malformed" ? {} : { ...review, correctness: kind !== "review-fail" };
       },
       abort.signal,
     );
     expect(evidence.passed).toBe(false);
+    if (kind === "review-fail") expect(evidence.error).toBeNull();
+    else if (kind === "mutating-review")
+      expect(evidence.error).toContain("changed during independent review");
+    else expect(evidence.review).toBeNull();
     expect(await readFile(evidence.artifactPath, "utf8")).toContain('"passed": false');
   });
   it("fingerprints untracked content, executable modes, links, and deletions", async () => {
@@ -268,24 +321,38 @@ describe("completion and content fingerprints", () => {
     expect(new Set(states).size).toBe(states.length);
     expect((await treeSnapshot(f.campaign.worktree)).diff).toContain("Untracked file");
   });
-  it("persists notes, pause, blockers and errors and forbids agent approval", async () => {
+  it("persists report notes, pause, blockers and errors; only the host changes status", async () => {
     const f = await setup();
     const signal = new AbortController().signal;
     let events = 0;
     const unsubscribe = f.control.subscribe(() => events++);
-    await f.control.action({ action: "notes", text: "Useful memory" }, signal);
-    expect(f.control.brief()).toContain("Useful memory");
+    await f.control.begin(signal);
+    await f.control.record(plan);
+    await f.control.begin(signal);
     f.control.pause();
     expect(f.campaign.status).toBe("paused");
     f.control.pause();
+    // Finished work is recorded even after a pause request; the next begin stops.
+    await f.control.record({ summary: "Half done", notes: ["Useful memory"], blocker: "" });
+    expect(f.control.brief()).toContain("implement: Half done\n\nUseful memory");
+    expect(await f.control.begin(signal)).toEqual({
+      status: "paused",
+      stage: "review",
+      evidence: null,
+    });
     f.control.continue();
-    await f.control.action({ action: "blocker", text: "Need task scope" }, signal);
-    expect(f.campaign.status).toBe("blocked");
+    f.campaign.stage = "fix";
+    await expect(f.control.record({ approve: true })).rejects.toThrow("Invalid structured");
+    await f.control.record({ ...report, blocker: "Need task scope" });
+    expect(f.campaign).toMatchObject({
+      status: "blocked",
+      stage: "fix",
+      result: "Need task scope",
+    });
     f.control.continue();
     f.control.stop("failed", "execution failed");
     expect(f.store.getCampaign(f.campaign.id)?.result).toBe("execution failed");
-    for (const action of ["notes", "blocker", "approve"])
-      await expect(f.control.action({ action }, signal)).rejects.toThrow();
+    await expect(f.control.record(report)).rejects.toThrow("Campaign is failed");
     f.control.stop("cancelled", "user aborted");
     expect(() => f.control.continue()).toThrow("cannot continue");
     unsubscribe();

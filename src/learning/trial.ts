@@ -83,7 +83,7 @@ export const runTrial: TrialRunner = async (options) => {
       beforeModelCall: options.beforeModelCall,
       signal: options.signal,
     });
-    await session.runHeadless(options.signal);
+    await session.run(options.signal);
     trial.evidence = campaign.evidence;
     options.signal.throwIfAborted();
     if (campaign.evidence?.checks.some((check) => check.exitCode !== 0)) trial.score = 0;
