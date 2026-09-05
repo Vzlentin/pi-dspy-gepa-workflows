@@ -1,0 +1,23 @@
+typescript:
+  coverage:
+    threshold: 85
+  complexity:
+    max: 8
+  dry:
+    max_findings: 0
+    paths: [src]
+    exclude: ["**/*.test.ts", "dist/**", "node_modules/**"]
+    copied_blocks:
+      enabled: true
+      min_tokens: 100
+  dependency_boundaries:
+    - from: src/state
+      allow: []
+    - from: src/campaign
+      allow: [src/state]
+    - from: src/runtime
+      allow: [src/state, src/campaign]
+    - from: src/learning
+      allow: [src/state, src/campaign, src/runtime]
+    - from: src/launcher
+      allow: [src/state, src/campaign, src/runtime, src/learning]

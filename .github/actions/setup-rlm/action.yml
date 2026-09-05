@@ -1,0 +1,16 @@
+name: Prepare pinned RLM acceptance runtime
+description: Install the unchanged RLM source and Python dependencies outside the checkout.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        rlm_test_root="$RUNNER_TEMP/pi-ipython-rlm"
+        git clone --no-checkout https://github.com/Vzlentin/pi-ipython-rlm.git "$rlm_test_root"
+        git -C "$rlm_test_root" checkout --detach 91861ba9427605efc67d88968339181910a4ed19
+        git -C "$rlm_test_root" submodule update --init --recursive
+        ln -s "$GITHUB_WORKSPACE/node_modules" "$rlm_test_root/node_modules"
+        uv venv --python 3.12.13 "$rlm_test_root/extensions/.rlm-python"
+        uv pip install --python "$rlm_test_root/extensions/.rlm-python/bin/python" 'ipykernel==7.3.0' 'jupyter-client==8.9.1'
+        echo "PI_CAMPAIGN_TEST_RLM=$rlm_test_root" >> "$GITHUB_ENV"
