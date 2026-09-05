@@ -56,6 +56,7 @@
     "lint": "oxlint --deny-warnings src test",
     "prepare": "node scripts/prepare.mjs",
     "test": "vitest run",
+    "test:acceptance": "vitest run --config vitest.acceptance.config.ts",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:python": "uv run --frozen pytest python/tests",

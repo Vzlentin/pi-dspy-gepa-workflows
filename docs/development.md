@@ -9,9 +9,17 @@ npx slophammer-ts@latest dry .
 npx slophammer-ts@latest check . --only ts.dependency-boundaries-required
 ```
 
-`npm run check` runs formatting, lint, TypeScript, build, Vitest with 85% coverage thresholds, and the pinned Python format/lint/tests. Tests use temporary repositories, private state directories, fake models and deterministic DSPy responses. End-to-end tests run the real Pi SDK, real DSPy Python program, and a real persistent IPython kernel with fake child models. No automated test calls a real model.
+`npm run check` runs formatting, lint, TypeScript, build, Vitest with 85% coverage thresholds, and the pinned Python format/lint/tests. Tests use temporary repositories, private state directories, fake models and deterministic DSPy responses. `npm run test:e2e` runs the real Pi SDK and real DSPy Python program with a local fake RLM extension. Both commands are self-contained after `npm ci` and `uv sync --frozen`: CI and publishing need no private repository checkout or cross-repository token. No automated test calls a real model.
 
-The RLM checkout defaults to the sibling `../pi-ipython-rlm`; set `PI_CAMPAIGN_TEST_RLM` to override it. Initialize its pinned `librlm` submodule and provision its documented IPython environment before running end-to-end tests. Tests copy the extension, library and Python environment into a temporary directory. They do not modify the installed RLM package.
+## Local RLM acceptance
+
+Run the real persistent IPython kernel and historical reference checks explicitly:
+
+```sh
+PI_CAMPAIGN_TEST_RLM=/absolute/path/to/pi-ipython-rlm npm run test:acceptance
+```
+
+The RLM checkout defaults to the sibling `../pi-ipython-rlm`. Use commit `91861ba9427605efc67d88968339181910a4ed19` with full history, initialize its pinned `librlm` submodule, and provision its documented IPython environment before running acceptance. Tests copy the extension, library and Python environment into a temporary directory. They do not modify the installed RLM package. Missing prerequisites fail the command rather than silently skipping tests. Acceptance is local and opt-in, not part of default CI or publishing; default test success does not establish real-RLM compatibility.
 
 To validate the historical corpus without models:
 

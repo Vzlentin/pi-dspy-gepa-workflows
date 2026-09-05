@@ -4,7 +4,6 @@ import { afterEach, expect, it, vi } from "vitest";
 import { git } from "../src/campaign/process.js";
 import { disposableCopy } from "../src/learning/copies.js";
 import { AllowanceMeter, runExperiment } from "../src/learning/experiment.js";
-import { bootstrap, shellQuote } from "../src/learning/historical.js";
 import { IdleLearning } from "../src/learning/scheduler.js";
 import { runTrial, feedback } from "../src/learning/trial.js";
 import type { EvaluationCase, Trial } from "../src/state/contracts.js";
@@ -49,6 +48,28 @@ it("exports the starting tree without future history or reference patches", asyn
     await copy.close();
   }
   await expect(disposableCopy(f.repository, "nonexistent")).rejects.toThrow();
+});
+it("exports pinned submodule source from a local repository", async () => {
+  const f = await setup();
+  const sub = await setup();
+  await git(
+    f.repository,
+    "-c",
+    "protocol.file.allow=always",
+    "submodule",
+    "add",
+    sub.repository,
+    "lib",
+  );
+  await git(f.repository, "-c", "commit.gpgsign=false", "commit", "-qam", "test: pin submodule");
+  const copy = await disposableCopy(f.repository, "HEAD");
+  try {
+    expect(await readFile(join(copy.repository, "lib", "source.txt"), "utf8")).toBe("starting\n");
+    expect(await git(copy.repository, "ls-files", "lib/source.txt")).toBe("lib/source.txt");
+    await expect(readFile(join(copy.repository, "lib", ".git"))).rejects.toThrow();
+  } finally {
+    await copy.close();
+  }
 });
 it("validates and freezes cases and keeps held-out cases out of optimization", async () => {
   const f = await setup();
@@ -298,15 +319,4 @@ it("does not admit learning until a paused live action has actually settled", as
   scheduler.update();
   await vi.waitFor(() => expect(experiment).toHaveBeenCalledOnce());
   await scheduler.close();
-});
-it("records real historical reference/starting checks without modifying the RLM checkout", async () => {
-  const f = await setup();
-  const source =
-    process.env.PI_CAMPAIGN_TEST_RLM ?? new URL("../../pi-ipython-rlm", import.meta.url).pathname;
-  const before = await git(source, "status", "--porcelain");
-  const result = (await bootstrap(f.store, source)) as unknown[];
-  expect(result).toHaveLength(3);
-  expect(await git(source, "status", "--porcelain")).toBe(before);
-  expect(shellQuote("a'b")).toBe("'a'\\''b'");
-  await expect(bootstrap(f.store, ".")).rejects.toThrow("absolute");
 });

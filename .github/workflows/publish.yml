@@ -72,9 +72,6 @@ jobs:
           npm ci
           uv sync --frozen
 
-      - name: Prepare pinned RLM acceptance runtime
-        uses: ./.github/actions/setup-rlm
-
       - name: Check
         run: npm run check
 

@@ -39,9 +39,6 @@ jobs:
           npm ci
           uv sync --frozen
 
-      - name: Prepare pinned RLM acceptance runtime
-        uses: ./.github/actions/setup-rlm
-
       - name: Check (format, lint, typecheck, build, coverage, Python)
         run: npm run check
 
@@ -75,9 +72,6 @@ jobs:
         run: |
           npm ci
           uv sync --frozen
-
-      - name: Prepare pinned RLM acceptance runtime
-        uses: ./.github/actions/setup-rlm
 
       - name: End-to-end tests (mock provider, real pi runtime)
         run: npm run test:e2e
