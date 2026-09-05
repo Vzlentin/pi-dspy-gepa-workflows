@@ -18,7 +18,7 @@ beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "historical-test-"));
   store = new Store(join(root, "state.sqlite"));
   vi.mocked(git).mockImplementation(async (_repository, operation, ref) => {
-    if (operation === "rev-parse") return ref!;
+    if (operation === "rev-parse") return ref === "--show-toplevel" ? root : ref!;
     if (operation === "show") return "reference test source";
     throw new Error(`Unexpected git operation: ${operation}`);
   });

@@ -1,6 +1,6 @@
 # Continuous campaigns
 
-A campaign pursues one goal in one repository. Run `campaign start --repo /absolute/path --goal 'Concrete goal' [--base ref] [--config file] [--rlm /absolute/package/path]`. Pi opens in a detached dedicated worktree from the resolved committed base. The original checkout's staged, unstaged, and untracked source is preserved. `campaign status` reports metadata and whether any completion evidence still matches the working tree. `--state /absolute/file.sqlite` selects separate private state.
+A campaign pursues one goal in one repository. Repository paths are resolved to the real Git root before selecting an approved candidate, so an absolute subdirectory or symlink selects the same repository policy. Run `campaign start --repo /absolute/path --goal 'Concrete goal' [--base ref] [--config file] [--rlm /absolute/package/path]`. Pi opens in a detached dedicated worktree from the resolved committed base. The original checkout's staged, unstaged, and untracked source is preserved. `campaign status` reports metadata and whether any completion evidence still matches the working tree. `--state /absolute/file.sqlite` selects separate private state.
 
 ## Scope, instructions, and completion
 
@@ -74,11 +74,21 @@ No learning runs without an explicit allowance. Add these fields to a launch con
 
 Learning uses cases from the campaign repository only, and learned candidates carry that repository identity. An allowance bounds trial admissions and model request admissions; each trial has its own deadline. Concurrency defaults to one if omitted. In-flight calls may finish after admissions stop and their usage is retained. These limits are experiment spend controls, not truncation of user-visible output. A model-call allowance is not a dollar-price guarantee. Pi reports cost where the provider supplies it.
 
-Cases are immutable `pi-dspy-gepa.evaluation-case.v1` objects containing `id`, `role` (`training`, `validation`, or `heldOut`), `repository`, `startingCommit`, `task`, `setup` commands, `acceptance`, and a review `rubric`. Setup is trusted host configuration. The starting tree, including pinned submodule source, is exported into a temporary repository with fresh history. Future commits and solution patches are absent from agent-visible Git history. The same campaign runtime runs headlessly in a dedicated worktree within that disposable copy. Complete final source, transcripts, checks, and traces are retained as experiment artifacts after the temporary copy is removed.
+Cases are immutable `pi-dspy-gepa.evaluation-case.v1` objects containing `id`, `role` (`training`, `validation`, or `heldOut`), `repository`, `startingCommit`, `task`, `setup` commands, `acceptance`, and a review `rubric`. Setup is trusted host configuration. The starting tree, including pinned submodule source, is exported into a private repository with fresh history. Future commits and solution patches are absent from agent-visible Git history. The same campaign runtime runs headlessly in a dedicated worktree. The isolated repository, worktree, state, transcripts, checks, and traces are created at their final experiment artifact paths and retained in place, including failed runs. There is no teardown copy or path rewriting. Historical reference validation still uses temporary copies that are removed after its reports are saved.
 
 Required check failures score zero. Otherwise quality is the mean of separate completeness, correctness, and maintainability verdicts. Missing or malformed review is an evaluation error with no score. Tokens, available cost, duration, and per-case outcomes are separate metrics. GEPA receives concrete check/review evidence and DSPy traces. Held-out task content and feedback are filtered out before the optimizer worker receives its inputs. The three bootstrap cases provide initial integration evidence, not broad statistical proof.
 
 Standalone GEPA's adapter optimizes exactly two text components: instruction text and a JSON list of schema-validated demonstrations. Python code, signatures, tools, and control rules are fixed. Candidates freeze their learned state, program digest, DSPy/GEPA/Pi versions, and content identity. Experiments begin only when repository campaigns are completed or paused. Continuing live work cancels unfinished trials and retains completed results. The candidate/corpus/configuration digest prevents repeating the same idle experiment, including after interruption.
+
+### Evaluation lifecycle and ownership
+
+Cancellation or a deadline leaves a trial `cancelled` with no score, even if an earlier verification passed. Existing evidence and usage remain available. Session cleanup failures leave the source and artifacts intact and produce an error result.
+
+An active experiment rechecks its admission predicate every 250ms as well as before new model calls and trials. In the launcher this reads repository campaign status from SQLite, so live work resumed by another process cancels unfinished trials on the next observation. This is polling, not an instantaneous cross-process lock; transitions entirely between observations are not detected. No daemon or operation journal is involved.
+
+A model runtime can belong to only one open campaign at a time. Concurrent SDK trials must supply separate runtime instances or omit `sessionOptions.modelRuntime` to use the default per-session runtime. Overlapping instrumentation fails explicitly; closing a session releases ownership and repeated cleanup is harmless.
+
+`campaign bootstrap` also resolves repository paths to the real Git root. Custom evaluation cases must use that same canonical root for repository matching.
 
 `/campaign learning` shows comparisons and results. `/campaign approve ID` is an explicit human command that changes the repository default for subsequent campaigns. Existing campaigns remain pinned; prior candidates remain available for selection.
 

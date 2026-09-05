@@ -2,11 +2,14 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { git } from "../src/campaign/process.js";
+import { evidenceCurrent } from "../src/campaign/verification.js";
+import { startCampaign } from "../src/campaign/workspace.js";
 import { disposableCopy } from "../src/learning/copies.js";
 import { AllowanceMeter, runExperiment } from "../src/learning/experiment.js";
 import { IdleLearning } from "../src/learning/scheduler.js";
 import { runTrial, feedback } from "../src/learning/trial.js";
 import type { EvaluationCase, Trial } from "../src/state/contracts.js";
+import { Store } from "../src/state/store.js";
 import { fixture, FakeWorker, call, review } from "./helpers.js";
 import { runtimeFixture } from "./runtime-fixture.js";
 
@@ -243,11 +246,12 @@ it.each(["pass", "check-fail", "review-fail", "review-malformed", "setup-fail", 
       call("campaign", { action: "complete" }),
       call("campaign", { action: "blocker", text: "Checks or review need fixes" }),
     ]);
+    const artifacts = join(f.root, 'trials"quoted');
     const result = await runTrial({
       experimentId: "experiment",
       candidate: f.candidate,
       case: value,
-      artifacts: join(f.root, "trials"),
+      artifacts,
       signal: kind === "cancelled" ? AbortSignal.abort() : AbortSignal.timeout(15000),
       beforeModelCall: () => {},
       sessionOptions: {
@@ -261,6 +265,16 @@ it.each(["pass", "check-fail", "review-fail", "review-malformed", "setup-fail", 
       expect(result.score).toBe(1);
       expect(await readFile(result.tracePath, "utf8")).toContain("complete");
       expect(await readFile(result.evidence!.checks[0]!.outputPath, "utf8")).toBe("");
+      const retained = new Store(join(artifacts, result.id, "state", "state.sqlite"));
+      try {
+        const campaign = retained.campaigns()[0]!;
+        expect(campaign.evidence).toEqual(result.evidence);
+        expect(await readFile(campaign.sessionPath!, "utf8")).toContain("complete");
+        expect(await readFile(join(campaign.worktree, "source.txt"), "utf8")).toBe("starting\n");
+        expect(await evidenceCurrent(campaign)).toBe(true);
+      } finally {
+        retained.close();
+      }
     } else if (kind === "check-fail") expect(result.score).toBe(0);
     else if (kind === "review-fail") expect(result.score).toBeCloseTo(2 / 3);
     else expect(result.score).toBeNull();
@@ -268,6 +282,152 @@ it.each(["pass", "check-fail", "review-fail", "review-malformed", "setup-fail", 
     expect(await readFile(join(f.repository, "source.txt"), "utf8")).toBe("starting\n");
   },
 );
+it.each(["decision", "shutdown"])(
+  "retains evidence but does not score a trial cancelled during %s",
+  async (when) => {
+    const f = await setup();
+    const services = await runtimeFixture(f.root);
+    const abort = new AbortController();
+    const worker = new FakeWorker([
+      call("campaign", { action: when === "decision" ? "verify" : "complete" }),
+      async () => {
+        abort.abort(new Error("Trial cancelled"));
+        throw abort.signal.reason;
+      },
+    ]);
+    if (when === "shutdown")
+      worker.close = async () => {
+        abort.abort(new Error("Trial cancelled"));
+      };
+    const result = await runTrial({
+      experimentId: "experiment",
+      candidate: f.candidate,
+      case: cases(f)[0]!,
+      artifacts: join(f.root, "trials"),
+      signal: abort.signal,
+      beforeModelCall: () => {},
+      sessionOptions: { ...services, worker, reviewer: async () => review },
+    });
+    expect(result).toMatchObject({
+      status: "cancelled",
+      score: null,
+      error: "Error: Trial cancelled",
+    });
+    expect(result.evidence?.passed).toBe(true);
+    expect(await feedback(result)).toContain("Trial cancelled");
+  },
+);
+it("keeps final source and paths when session cleanup fails", async () => {
+  const f = await setup();
+  const services = await runtimeFixture(f.root);
+  const worker = new FakeWorker([
+    call("write", { path: "source.txt", content: "surviving work" }),
+    call("campaign", { action: "complete" }),
+  ]);
+  worker.close = async () => {
+    throw new Error("Cleanup failed");
+  };
+  const artifacts = join(f.root, "trials");
+  const result = await runTrial({
+    experimentId: "experiment",
+    candidate: f.candidate,
+    case: cases(f)[0]!,
+    artifacts,
+    signal: AbortSignal.timeout(15000),
+    beforeModelCall: () => {},
+    sessionOptions: { ...services, worker, reviewer: async () => review },
+  });
+  expect(result).toMatchObject({ status: "error", score: null, error: "Error: Cleanup failed" });
+  const retained = new Store(join(artifacts, result.id, "state", "state.sqlite"));
+  try {
+    const campaign = retained.campaigns()[0]!;
+    expect(await readFile(join(campaign.worktree, "source.txt"), "utf8")).toBe("surviving work");
+    expect(await evidenceCurrent(campaign)).toBe(true);
+    expect(await readFile(result.tracePath, "utf8")).toContain("surviving work");
+    expect(JSON.parse(await readFile(join(artifacts, result.id, "trial.json"), "utf8"))).toEqual(
+      result,
+    );
+  } finally {
+    retained.close();
+  }
+});
+it("cancels an in-flight experiment when another connection resumes a repository campaign", async () => {
+  const f = await setup();
+  f.control.pause();
+  const other = await startCampaign(f.store, {
+    repository: f.repository,
+    goal: "Other work",
+    candidateId: f.campaign.candidateId,
+  });
+  other.status = "paused";
+  f.store.saveCampaign(other);
+  const connection = new Store(f.store.filePath);
+  const abort = new AbortController();
+  let trialSignal: AbortSignal | undefined;
+  const worker = new FakeWorker([
+    async (_payload, exchange, signal) => {
+      await exchange(
+        "evaluate",
+        {
+          cases: [cases(f)[0]],
+          components: { instructions: "learned", demonstrations: [] },
+        },
+        signal,
+      );
+      return { candidates: [] };
+    },
+  ]);
+  const running = runExperiment({
+    store: f.store,
+    repository: f.repository,
+    candidate: f.candidate,
+    allowance,
+    cases: cases(f),
+    signal: abort.signal,
+    idle: () =>
+      f.store
+        .campaigns()
+        .filter((value) => value.repository === f.repository)
+        .every((value) => ["paused", "completed", "cancelled"].includes(value.status)),
+    reflect: async () => ({ text: "unused" }),
+    worker,
+    trialRunner: async (options) => {
+      trialSignal = options.signal;
+      await new Promise<void>((resolve) =>
+        options.signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      return {
+        schema: "pi-dspy-gepa.trial.v1",
+        id: "interrupted",
+        experimentId: options.experimentId,
+        candidateId: f.campaign.candidateId,
+        caseId: options.case.id,
+        status: "cancelled",
+        score: null,
+        evidence: null,
+        tracePath: join(f.root, "missing"),
+        tokens: 0,
+        cost: null,
+        durationMs: 0,
+        error: "cancelled",
+      };
+    },
+  });
+  const rejected = expect(running).rejects.toThrow("completed or paused");
+  try {
+    await vi.waitFor(() => expect(trialSignal).toBeDefined());
+    other.status = "active";
+    connection.saveCampaign(other); // No local CampaignControl event reaches the experiment.
+    await rejected;
+    expect(trialSignal?.aborted).toBe(true);
+    expect(f.store.trials()).toMatchObject([{ status: "cancelled" }]);
+    expect(f.store.experiments()).toMatchObject([{ result: { status: "cancelled" } }]);
+  } finally {
+    abort.abort();
+    await running.catch(() => {});
+    connection.close();
+  }
+});
 it("starts only at idle, cancels trials when live work resumes, and waits for cleanup on exit", async () => {
   const f = await setup();
   const started = vi.fn();

@@ -7,6 +7,11 @@ import { LOCAL_AUTHORITY, type Campaign, type Authority } from "../state/contrac
 import type { Store } from "../state/store.js";
 import { git } from "./process.js";
 
+export async function repositoryRoot(path: string): Promise<string> {
+  if (!isAbsolute(path)) throw new Error("Repository path must be absolute");
+  return realpath(await git(path, "rev-parse", "--show-toplevel"));
+}
+
 export async function startCampaign(
   store: Store,
   input: {
@@ -20,7 +25,7 @@ export async function startCampaign(
 ): Promise<Campaign> {
   if (!isAbsolute(input.repository) || !input.goal.trim())
     throw new Error("An absolute repository path and nonempty goal are required");
-  const repository = await realpath(await git(input.repository, "rev-parse", "--show-toplevel"));
+  const repository = await repositoryRoot(input.repository);
   const baseRef = input.base ?? "HEAD";
   const baseCommit = await git(
     repository,

@@ -66,10 +66,12 @@ export async function runExperiment(options: ExperimentOptions): Promise<{
   });
   const result = { id, candidates: [] as string[], trials: 0, modelCalls: 0, repeated: false };
   const meter = new AllowanceMeter(options.allowance);
+  const activity = new AbortController();
+  const signal = AbortSignal.any([options.signal, activity.signal]);
   const assertIdle = () => {
-    options.signal.throwIfAborted();
     if (!options.idle())
-      throw new Error("Learning runs only while campaigns are completed or paused");
+      activity.abort(new Error("Learning runs only while campaigns are completed or paused"));
+    signal.throwIfAborted();
   };
   assertIdle();
   if (
@@ -92,7 +94,16 @@ export async function runExperiment(options: ExperimentOptions): Promise<{
   };
   let errorMessage: string | null = null;
   const began = Date.now();
+  // ponytail: poll shared activity every 250ms; use notifications if tighter cancellation is needed.
+  const monitor = setInterval(() => {
+    try {
+      assertIdle();
+    } catch (error) {
+      activity.abort(error);
+    }
+  }, 250).unref();
   try {
+    assertIdle();
     const proposed = (await worker.request(
       {
         operation: "learn",
@@ -158,8 +169,9 @@ export async function runExperiment(options: ExperimentOptions): Promise<{
         if (failure?.status === "rejected") throw failure.reason;
         return outcomes;
       },
-      options.signal,
+      signal,
     )) as { candidates: Pick<Candidate, "instructions" | "demonstrations">[] };
+    signal.throwIfAborted();
     for (const learned of proposed.candidates) {
       if (Object.keys(learned).some((key) => !["instructions", "demonstrations"].includes(key)))
         throw new Error("Optimizer attempted to change a fixed contract");
@@ -176,13 +188,14 @@ export async function runExperiment(options: ExperimentOptions): Promise<{
     errorMessage = String(error);
     throw error;
   } finally {
+    clearInterval(monitor);
     await worker.close();
     result.trials = meter.trials;
     result.modelCalls = meter.modelCalls;
     options.store.finishExperiment(id, {
       ...result,
       error: errorMessage,
-      status: options.signal.aborted ? "cancelled" : errorMessage ? "error" : "completed",
+      status: signal.aborted ? "cancelled" : errorMessage ? "error" : "completed",
       durationMs: Date.now() - began,
     });
   }

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -144,6 +144,30 @@ it("launches committed worktree with explicit contract and provides human-only a
   await launch(["status", ...f.args]);
   expect(log).toHaveBeenCalledWith(expect.stringContaining('"evidenceCurrent":false'));
 });
+it.each(["root", "subdirectory", "symlink"])(
+  "selects the approved candidate using canonical repository identity from %s",
+  async (kind) => {
+    const f = await setup();
+    const db = new Store(f.state);
+    const id = db.addCandidate({
+      ...seedCandidate(),
+      repository: f.repository,
+      instructions: "Approved repository policy",
+    });
+    db.approve(f.repository, id);
+    db.close();
+    const subdirectory = join(f.repository, "nested");
+    const alias = join(f.root, "alias");
+    await mkdir(subdirectory);
+    await symlink(f.repository, alias);
+    const repository = kind === "root" ? f.repository : kind === "symlink" ? alias : subdirectory;
+    await launch(["start", "--repo", repository, "--goal", "Goal", ...f.args]);
+    expect(mocks.open.mock.calls.at(-1)![0].campaign).toMatchObject({
+      repository: f.repository,
+      candidateId: id,
+    });
+  },
+);
 it("resumes explicitly and rejects contract replacement and terminal campaigns", async () => {
   const f = await setup();
   await launch(["start", "--repo", f.repository, "--goal", "Goal", ...f.args]);

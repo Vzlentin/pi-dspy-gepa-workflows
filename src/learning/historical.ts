@@ -1,6 +1,7 @@
 import { mkdir, writeFile, symlink, readFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { git, run } from "../campaign/process.js";
+import { repositoryRoot } from "../campaign/workspace.js";
 import { PACKAGE_ROOT } from "../runtime/python.js";
 import { type EvaluationCase } from "../state/contracts.js";
 import { Store } from "../state/store.js";
@@ -31,6 +32,7 @@ export function shellQuote(value: string): string {
 }
 export async function bootstrap(store: Store, repository: string): Promise<unknown> {
   if (!isAbsolute(repository)) throw new Error("Historical repository path must be absolute");
+  repository = await repositoryRoot(repository);
   const output = join(store.root, "historical");
   await mkdir(output, { recursive: true, mode: 0o700 });
   const reports = [];

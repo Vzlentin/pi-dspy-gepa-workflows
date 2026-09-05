@@ -143,6 +143,38 @@ it("meters model calls before dispatch, records in-flight usage, and cancels at 
     blocked();
   }
 });
+it("rejects shared model runtime ownership and restores it without stale cleanup", async () => {
+  const f = await setup();
+  const original = f.modelRuntime.streamSimple;
+  const ledger = new UsageLedger();
+  const admit = vi.fn();
+  const abort = new AbortController();
+  const restore = accountModels(
+    f.modelRuntime,
+    admit,
+    (usage) => ledger.record(usage),
+    abort.signal,
+  );
+  try {
+    expect(() => accountModels(f.modelRuntime, admit, () => {})).toThrow("already belongs");
+    await f.modelRuntime.completeSimple(model, { messages: [] });
+    expect(admit).toHaveBeenCalledOnce();
+    expect(ledger.calls).toBe(1);
+    abort.abort();
+  } finally {
+    restore();
+  }
+  expect(f.modelRuntime.streamSimple).toBe(original);
+  const next = accountModels(f.modelRuntime, admit, () => {});
+  try {
+    restore(); // An old session's repeated close must not unhook the new owner.
+    expect(() => accountModels(f.modelRuntime, admit, () => {})).toThrow("already belongs");
+    expect((await f.modelRuntime.completeSimple(model, { messages: [] })).stopReason).toBe("stop");
+  } finally {
+    next();
+  }
+  expect(f.modelRuntime.streamSimple).toBe(original);
+});
 it("waits for host exchange cleanup when a Python worker is cancelled", async () => {
   const f = await setup();
   const file = join(f.root, "pending.cjs");

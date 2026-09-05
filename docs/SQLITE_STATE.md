@@ -19,4 +19,6 @@ All persisted structured records use camelCase fields and versioned `schema` ide
 
 Pi's JSONL session file is the conversation authority. The database stores its path, not a replayable copy of each operation. Complete DSPy traces, Python diagnostics, verification logs, review evidence and evaluation source artifacts live in private files. Each evidence object records its content fingerprint and output locations. `campaign status` computes freshness from current source.
 
+Trial state and its isolated Git repository are created directly under the trial's private artifact directory. Their worktree, transcript, and evidence paths remain valid after shutdown; teardown never copies the database or rewrites serialized paths. Failed trials retain the same files for inspection.
+
 There is no per-operation replay or automatic daemon recovery. Explicit resume reuses the transcript and working tree with fresh Python processes. A claimed live owner prevents concurrent writers. The SQLite store imports no Pi, runtime, or learning modules.

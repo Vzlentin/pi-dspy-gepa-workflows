@@ -3,7 +3,7 @@ import { resolve, isAbsolute } from "node:path";
 import { parseArgs } from "node:util";
 import { InteractiveMode } from "@earendil-works/pi-coding-agent";
 import { evidenceCurrent } from "../campaign/verification.js";
-import { startCampaign, ownerAlive, ownerToken } from "../campaign/workspace.js";
+import { startCampaign, ownerAlive, ownerToken, repositoryRoot } from "../campaign/workspace.js";
 import { runExperiment } from "../learning/experiment.js";
 import { IdleLearning } from "../learning/scheduler.js";
 import { seedCandidate } from "../runtime/dispatcher.js";
@@ -56,8 +56,8 @@ export async function launch(argv: string[]): Promise<void> {
     let campaign: Campaign;
     if (command === "start") {
       if (!args.values.repo || !args.values.goal) throw new Error(HELP);
-      const repository = resolve(args.values.repo);
       if (!isAbsolute(args.values.repo)) throw new Error("--repo must be absolute");
+      const repository = await repositoryRoot(args.values.repo);
       const candidateId = store.defaultCandidate(repository) ?? store.addCandidate(seedCandidate());
       campaign = await startCampaign(store, {
         repository,

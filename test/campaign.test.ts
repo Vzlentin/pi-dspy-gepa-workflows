@@ -4,7 +4,13 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { run, git } from "../src/campaign/process.js";
 import { verify, evidenceCurrent } from "../src/campaign/verification.js";
-import { ownerAlive, ownerToken, startCampaign, treeSnapshot } from "../src/campaign/workspace.js";
+import {
+  ownerAlive,
+  ownerToken,
+  repositoryRoot,
+  startCampaign,
+  treeSnapshot,
+} from "../src/campaign/workspace.js";
 import { CandidateSchema, validate, candidateId, digest } from "../src/state/contracts.js";
 import { Store, statePath } from "../src/state/store.js";
 import { fixture, review } from "./helpers.js";
@@ -37,6 +43,7 @@ describe("campaign state and contracts", () => {
     await expect(
       startCampaign(f.store, { repository: ".", goal: "x", candidateId: f.campaign.candidateId }),
     ).rejects.toThrow("absolute");
+    await expect(repositoryRoot(".")).rejects.toThrow("absolute");
     await expect(git(f.repository, "rev-parse", "does-not-exist")).rejects.toThrow("failed");
   });
   it("keeps candidates immutable and promotion applies only to future campaigns", async () => {

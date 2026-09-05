@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { run } from "../campaign/process.js";
 import { startCampaign, treeSnapshot } from "../campaign/workspace.js";
@@ -12,7 +12,7 @@ import {
   candidateId,
 } from "../state/contracts.js";
 import { Store } from "../state/store.js";
-import { disposableCopy } from "./copies.js";
+import { exportRepository } from "./copies.js";
 
 export type TrialOptions = {
   experimentId: string;
@@ -45,15 +45,18 @@ export const runTrial: TrialRunner = async (options) => {
     error: null,
   };
   let session: Awaited<ReturnType<typeof openCampaign>> | undefined;
-  let copy: Awaited<ReturnType<typeof disposableCopy>> | undefined;
   let store: Store | undefined;
   try {
     options.signal.throwIfAborted();
-    copy = await disposableCopy(options.case.repository, options.case.startingCommit);
-    store = new Store(join(copy.root, "state", "state.sqlite"));
+    const repository = await exportRepository(
+      options.case.repository,
+      options.case.startingCommit,
+      artifacts,
+    );
+    store = new Store(join(artifacts, "state", "state.sqlite"));
     store.addCandidate(options.candidate);
     const campaign = await startCampaign(store, {
-      repository: copy.repository,
+      repository,
       goal: options.case.task,
       candidateId: trial.candidateId,
       authority: { ...LOCAL_AUTHORITY },
@@ -82,6 +85,7 @@ export const runTrial: TrialRunner = async (options) => {
     });
     await session.runHeadless(options.signal);
     trial.evidence = campaign.evidence;
+    options.signal.throwIfAborted();
     if (campaign.evidence?.checks.some((check) => check.exitCode !== 0)) trial.score = 0;
     else if (campaign.evidence?.review && !campaign.evidence.error) {
       if (campaign.evidence.fingerprint !== (await treeSnapshot(campaign.worktree)).fingerprint)
@@ -111,20 +115,12 @@ export const runTrial: TrialRunner = async (options) => {
       trial.tokens = session.ledger.usage.totalTokens;
       trial.cost = session.ledger.calls ? session.ledger.usage.cost.total : null;
     }
-    // Preserve even partial traces and failed-run evidence.
-    try {
-      if (store) {
-        store.close();
-        await cp(store.root, join(artifacts, "state"), { recursive: true });
-        if (trial.evidence) {
-          trial.evidence = JSON.parse(
-            JSON.stringify(trial.evidence).replaceAll(store.root, join(artifacts, "state")),
-          ) as NonNullable<Trial["evidence"]>;
-          await writeFile(trial.evidence.artifactPath, JSON.stringify(trial.evidence, null, 2));
-        }
-      }
-    } finally {
-      await copy?.close();
+    // State, source, and traces already have their final paths, including failed runs.
+    store?.close();
+    if (options.signal.aborted) {
+      trial.status = "cancelled";
+      trial.score = null;
+      trial.error = String(options.signal.reason);
     }
     trial.durationMs = Date.now() - began;
   }
