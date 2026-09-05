@@ -83,7 +83,7 @@ it("validates and freezes cases and keeps held-out cases out of optimization", a
   const worker = new FakeWorker([
     async (payload) => {
       expect(JSON.stringify(payload)).not.toContain("heldOut");
-      return { candidates: [{ instructions: "new", demonstrations: [] }] };
+      return { candidates: [{ stages: f.candidate.stages }] };
     },
   ]);
   const options = {
@@ -138,7 +138,7 @@ it("enforces trial and model admission allowances with configured parallelism", 
         "evaluate",
         {
           cases: cases(f).slice(0, 2),
-          components: { instructions: "learned", demonstrations: [] },
+          components: { stages: f.candidate.stages },
         },
         signal,
       );
@@ -186,15 +186,15 @@ it.each([
     async (_payload, exchange, signal) => {
       if (reason === "unknown-operation") return exchange("execute-code", {}, signal);
       if (reason === "contract-change")
-        return { candidates: [{ instructions: "x", demonstrations: [], programId: "evil" }] };
+        return { candidates: [{ stages: f.candidate.stages, programId: "evil" }] };
       return exchange(
         "evaluate",
         {
           cases: reason === "heldOut" ? [cases(f)[2]] : cases(f).slice(0, 2),
           components:
             reason === "invalid-candidate"
-              ? { instructions: "x", demonstrations: [], code: "evil" }
-              : { instructions: "x", demonstrations: [] },
+              ? { stages: f.candidate.stages, code: "evil" }
+              : { stages: f.candidate.stages },
         },
         signal,
       );
@@ -232,56 +232,63 @@ it.each([
     }),
   ).rejects.toThrow();
 });
-it.each(["pass", "check-fail", "review-fail", "review-malformed", "setup-fail", "cancelled"])(
-  "evaluates %s through the same real Pi campaign runtime",
-  async (kind) => {
-    const f = await setup();
-    const services = await runtimeFixture(f.root);
-    const value = {
-      ...cases(f)[0]!,
-      setup: kind === "setup-fail" ? ["exit 4"] : ["printf setup"],
-      acceptance: { criteria: ["Goal"], commands: [kind === "check-fail" ? "exit 1" : "true"] },
-    };
-    const worker = new FakeWorker([
-      call("campaign", { action: "complete" }),
-      call("campaign", { action: "blocker", text: "Checks or review need fixes" }),
-    ]);
-    const artifacts = join(f.root, 'trials"quoted');
-    const result = await runTrial({
-      experimentId: "experiment",
-      candidate: f.candidate,
-      case: value,
-      artifacts,
-      signal: kind === "cancelled" ? AbortSignal.abort() : AbortSignal.timeout(15000),
-      beforeModelCall: () => {},
-      sessionOptions: {
-        ...services,
-        worker,
-        reviewer: async () =>
-          kind === "review-malformed" ? {} : { ...review, maintainability: kind !== "review-fail" },
-      },
-    });
-    if (kind === "pass") {
-      expect(result.score).toBe(1);
-      expect(await readFile(result.tracePath, "utf8")).toContain("complete");
-      expect(await readFile(result.evidence!.checks[0]!.outputPath, "utf8")).toBe("");
-      const retained = new Store(join(artifacts, result.id, "state", "state.sqlite"));
-      try {
-        const campaign = retained.campaigns()[0]!;
-        expect(campaign.evidence).toEqual(result.evidence);
-        expect(await readFile(campaign.sessionPath!, "utf8")).toContain("complete");
-        expect(await readFile(join(campaign.worktree, "source.txt"), "utf8")).toBe("starting\n");
-        expect(await evidenceCurrent(campaign)).toBe(true);
-      } finally {
-        retained.close();
-      }
-    } else if (kind === "check-fail") expect(result.score).toBe(0);
-    else if (kind === "review-fail") expect(result.score).toBeCloseTo(2 / 3);
-    else expect(result.score).toBeNull();
-    expect(await feedback(result)).toContain("evidence");
-    expect(await readFile(join(f.repository, "source.txt"), "utf8")).toBe("starting\n");
-  },
-);
+it.each([
+  "pass",
+  "check-fail",
+  "review-fail",
+  "workflow-fail",
+  "review-malformed",
+  "setup-fail",
+  "cancelled",
+])("evaluates %s through the same real Pi campaign runtime", async (kind) => {
+  const f = await setup();
+  const services = await runtimeFixture(f.root);
+  const value = {
+    ...cases(f)[0]!,
+    setup: kind === "setup-fail" ? ["exit 4"] : ["printf setup"],
+    acceptance: { criteria: ["Goal"], commands: [kind === "check-fail" ? "exit 1" : "true"] },
+  };
+  const worker = new FakeWorker([
+    call("campaign", { action: "plan", text: "Inspect and finish the source." }),
+    call("campaign", { action: "review" }),
+    call("campaign", { action: "blocker", text: "Checks or review need fixes" }),
+  ]);
+  const artifacts = join(f.root, 'trials"quoted');
+  const result = await runTrial({
+    experimentId: "experiment",
+    candidate: f.candidate,
+    case: value,
+    artifacts,
+    signal: kind === "cancelled" ? AbortSignal.abort() : AbortSignal.timeout(15000),
+    beforeModelCall: () => {},
+    sessionOptions: {
+      ...services,
+      worker,
+      workflowReviewer: async () => ({ ...review, correctness: kind !== "workflow-fail" }),
+      reviewer: async () =>
+        kind === "review-malformed" ? {} : { ...review, maintainability: kind !== "review-fail" },
+    },
+  });
+  if (kind === "pass") {
+    expect(result.score).toBe(1);
+    expect(await readFile(result.tracePath, "utf8")).toContain("review");
+    expect(await readFile(result.evidence!.checks[0]!.outputPath, "utf8")).toBe("");
+    const retained = new Store(join(artifacts, result.id, "state", "state.sqlite"));
+    try {
+      const campaign = retained.campaigns()[0]!;
+      expect(campaign.evidence).toEqual(result.evidence);
+      expect(await readFile(campaign.sessionPath!, "utf8")).toContain("review");
+      expect(await readFile(join(campaign.worktree, "source.txt"), "utf8")).toBe("starting\n");
+      expect(await evidenceCurrent(campaign)).toBe(true);
+    } finally {
+      retained.close();
+    }
+  } else if (kind === "check-fail" || kind === "workflow-fail") expect(result.score).toBe(0);
+  else if (kind === "review-fail") expect(result.score).toBeCloseTo(2 / 3);
+  else expect(result.score).toBeNull();
+  expect(await feedback(result)).toContain("evidence");
+  expect(await readFile(join(f.repository, "source.txt"), "utf8")).toBe("starting\n");
+});
 it.each(["decision", "shutdown"])(
   "retains evidence but does not score a trial cancelled during %s",
   async (when) => {
@@ -289,11 +296,8 @@ it.each(["decision", "shutdown"])(
     const services = await runtimeFixture(f.root);
     const abort = new AbortController();
     const worker = new FakeWorker([
-      call("campaign", { action: when === "decision" ? "verify" : "complete" }),
-      async () => {
-        abort.abort(new Error("Trial cancelled"));
-        throw abort.signal.reason;
-      },
+      call("campaign", { action: "plan", text: "Inspect and verify." }),
+      call("campaign", { action: "review" }),
     ]);
     if (when === "shutdown")
       worker.close = async () => {
@@ -306,14 +310,21 @@ it.each(["decision", "shutdown"])(
       artifacts: join(f.root, "trials"),
       signal: abort.signal,
       beforeModelCall: () => {},
-      sessionOptions: { ...services, worker, reviewer: async () => review },
+      sessionOptions: {
+        ...services,
+        worker,
+        reviewer: async () => {
+          if (when === "decision") abort.abort(new Error("Trial cancelled"));
+          return review;
+        },
+      },
     });
     expect(result).toMatchObject({
       status: "cancelled",
       score: null,
       error: "Error: Trial cancelled",
     });
-    expect(result.evidence?.passed).toBe(true);
+    expect(result.evidence?.passed).toBe(when === "shutdown");
     expect(await feedback(result)).toContain("Trial cancelled");
   },
 );
@@ -321,8 +332,9 @@ it("keeps final source and paths when session cleanup fails", async () => {
   const f = await setup();
   const services = await runtimeFixture(f.root);
   const worker = new FakeWorker([
+    call("campaign", { action: "plan", text: "Write surviving work and verify." }),
     call("write", { path: "source.txt", content: "surviving work" }),
-    call("campaign", { action: "complete" }),
+    call("campaign", { action: "review" }),
   ]);
   worker.close = async () => {
     throw new Error("Cleanup failed");
@@ -370,7 +382,7 @@ it("cancels an in-flight experiment when another connection resumes a repository
         "evaluate",
         {
           cases: [cases(f)[0]],
-          components: { instructions: "learned", demonstrations: [] },
+          components: { stages: f.candidate.stages },
         },
         signal,
       );
@@ -452,17 +464,22 @@ it("starts only at idle, cancels trials when live work resumes, and waits for cl
   scheduler.update();
   expect(started).not.toHaveBeenCalled();
   f.control.pause();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(started).not.toHaveBeenCalled();
+  f.campaign.status = "completed";
+  f.control.changed();
   await vi.waitFor(() => expect(started).toHaveBeenCalledTimes(1));
   scheduler.update();
   expect(started).toHaveBeenCalledTimes(1);
-  f.control.continue();
+  f.campaign.status = "active";
+  f.control.changed();
   await vi.waitFor(() => expect(stopped).toHaveBeenCalledTimes(1));
   await scheduler.close();
   f.control.pause();
   scheduler.update();
   expect(started).toHaveBeenCalledTimes(1);
 });
-it("does not admit learning until a paused live action has actually settled", async () => {
+it("does not admit learning until the completed campaign has actually settled", async () => {
   const f = await setup();
   let settled = false;
   const experiment = vi.fn(async () => {});
@@ -474,6 +491,9 @@ it("does not admit learning until a paused live action has actually settled", as
   );
   f.control.pause();
   await new Promise((resolve) => setImmediate(resolve));
+  expect(experiment).not.toHaveBeenCalled();
+  f.campaign.status = "completed";
+  f.control.changed();
   expect(experiment).not.toHaveBeenCalled();
   settled = true;
   scheduler.update();

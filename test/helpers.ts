@@ -80,7 +80,7 @@ export class FakeWorker implements Worker {
 export function call(name: string, args: Record<string, unknown>, id = "call"): Action {
   return { text: "", toolCalls: [{ id, name, arguments: args }] };
 }
-export async function fixture() {
+export async function fixture(candidate = seedCandidate()) {
   const root = await mkdtemp(join(tmpdir(), "campaign-test-"));
   const repository = join(root, "repo");
   await mkdir(repository);
@@ -92,14 +92,18 @@ export async function fixture() {
   await git(repository, "add", ".");
   await git(repository, "-c", "commit.gpgsign=false", "commit", "-qm", "test: initial source");
   const store = new Store(join(root, "state", "state.sqlite"));
-  const candidate = seedCandidate();
   const candidateId = store.addCandidate(candidate);
   const campaign = await startCampaign(store, {
     repository,
     goal: "Change source to finished",
     candidateId,
   });
-  const control = new CampaignControl(store, campaign, async () => review, join(root, "artifacts"));
+  const control = new CampaignControl(
+    store,
+    campaign,
+    { workflow: async () => review, acceptance: async () => review },
+    join(root, "artifacts"),
+  );
   return {
     root,
     repository,

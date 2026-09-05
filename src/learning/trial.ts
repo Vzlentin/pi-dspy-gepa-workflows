@@ -94,6 +94,8 @@ export const runTrial: TrialRunner = async (options) => {
       trial.score =
         [review.completeness, review.correctness, review.maintainability].filter(Boolean).length /
         3;
+      // A learned review that rejects correct work must not earn full credit by blocking.
+      if (trial.score === 1 && campaign.status !== "completed") trial.score = 0;
     } else
       throw new Error(
         campaign.result ?? campaign.evidence?.error ?? "Missing independent review evidence",

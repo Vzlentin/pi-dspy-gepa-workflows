@@ -19,6 +19,7 @@
   },
   "files": [
     "dist",
+    "prompts",
     "python/pi_dspy_gepa/**/*.py",
     "fixtures/historical",
     "docs",

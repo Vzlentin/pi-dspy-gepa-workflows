@@ -1,6 +1,6 @@
 # Pi DSPy/GEPA campaigns
 
-Continuous coding campaigns in Pi's existing terminal UI. DSPy chooses the next assistant action; Pi executes tools and owns the transcript. Standalone GEPA can improve instructions and demonstrations through explicitly budgeted, idle-only experiments. Candidate promotion is a human command.
+Continuous coding campaigns in Pi's existing terminal UI. A fixed DSPy workflow follows **plan → implement → review → fix → review**, with Pi executing tools and owning the transcript. After verified completion, explicitly budgeted GEPA experiments can improve each stage's instructions and demonstrations for future campaigns. Stage order, authority, acceptance checks, and the independent evaluator stay fixed. Candidate promotion is a human command.
 
 This package is alpha. It replaces the previous workflow engine, controllers, standalone viewers, and workflow catalog in place.
 

@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
+import { fixedStageInstructions } from "../../src/runtime/dispatcher.js";
 import { PythonWorker } from "../../src/runtime/python.js";
 import { openCampaign } from "../../src/runtime/session.js";
 import { fixture, call, FakeWorker, review, assistant, fakeStream } from "../helpers.js";
@@ -12,7 +13,8 @@ it("real Pi SDK executes local tools and verifies completion with a fake RLM ext
     const options = await runtimeFixture(f.root);
     const worker = new FakeWorker([
       call("campaign", {
-        action: "acceptance",
+        action: "plan",
+        text: "Change source, exercise the scratchpad, and review the whole change.",
         acceptance: {
           criteria: ["Source is finished"],
           commands: ['test "$(cat source.txt)" = finished'],
@@ -20,7 +22,7 @@ it("real Pi SDK executes local tools and verifies completion with a fake RLM ext
       }),
       call("write", { path: "source.txt", content: "finished" }),
       call("ipython", { code: "await rlm.final('work item')" }),
-      call("campaign", { action: "complete" }),
+      call("campaign", { action: "review" }),
     ]);
     const live = await openCampaign({ ...f, ...options, worker, reviewer: async () => review });
     const toolErrors: unknown[] = [];
@@ -58,6 +60,9 @@ it("real DSPy Python program obtains model access through Pi and Pi executes the
       streamSimple(model, context) {
         calls++;
         expect(context.tools ?? []).toHaveLength(0);
+        expect(JSON.stringify(context)).toContain(
+          JSON.stringify(fixedStageInstructions("plan")).slice(1, -1),
+        );
         return fakeStream(
           assistant(
             JSON.stringify({

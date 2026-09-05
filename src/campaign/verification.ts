@@ -8,6 +8,7 @@ import { treeSnapshot } from "./workspace.js";
 export type Reviewer = (
   input: {
     goal: string;
+    plan: string | null;
     constraints: string[];
     criteria: string[];
     diff: string;
@@ -15,10 +16,11 @@ export type Reviewer = (
   },
   signal: AbortSignal,
 ) => Promise<unknown>;
+export type Reviewers = { workflow: Reviewer; acceptance: Reviewer };
 export async function verify(
   campaign: Campaign,
   artifacts: string,
-  reviewer: Reviewer,
+  reviewers: Reviewers,
   signal: AbortSignal,
 ): Promise<Evidence> {
   const directory = join(artifacts, randomUUID());
@@ -28,6 +30,7 @@ export async function verify(
     schema: "pi-dspy-gepa.evidence.v1",
     fingerprint: before.fingerprint,
     checks: [],
+    workflowReview: null,
     review: null,
     error: null,
     passed: false,
@@ -50,24 +53,29 @@ export async function verify(
     const after = await treeSnapshot(campaign.worktree, campaign.baseCommit);
     if (after.fingerprint !== before.fingerprint)
       throw new Error("Working tree changed during verification; rerun checks on the final tree");
+    const input = {
+      goal: campaign.goal,
+      plan: campaign.plan,
+      constraints: campaign.constraints,
+      criteria: campaign.acceptance.criteria,
+      diff: after.diff,
+      checks: evidence.checks,
+    };
+    evidence.workflowReview = validate(ReviewSchema, await reviewers.workflow(input, signal));
+    signal.throwIfAborted();
+    if ((await treeSnapshot(campaign.worktree)).fingerprint !== before.fingerprint)
+      throw new Error("Working tree changed during workflow review");
     if (evidence.checks.some((check) => check.exitCode !== 0))
       throw new Error("Required checks failed");
-    evidence.review = validate(
-      ReviewSchema,
-      await reviewer(
-        {
-          goal: campaign.goal,
-          constraints: campaign.constraints,
-          criteria: campaign.acceptance.criteria,
-          diff: after.diff,
-          checks: evidence.checks,
-        },
-        signal,
-      ),
-    );
+    // The fixed evaluator never sees the learned review's verdict or prompts.
+    evidence.review = validate(ReviewSchema, await reviewers.acceptance(input, signal));
+    signal.throwIfAborted();
     if ((await treeSnapshot(campaign.worktree)).fingerprint !== before.fingerprint)
       throw new Error("Working tree changed during review");
     evidence.passed =
+      evidence.workflowReview.completeness &&
+      evidence.workflowReview.correctness &&
+      evidence.workflowReview.maintainability &&
       evidence.review.completeness &&
       evidence.review.correctness &&
       evidence.review.maintainability;

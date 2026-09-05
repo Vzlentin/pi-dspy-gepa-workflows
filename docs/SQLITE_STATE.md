@@ -7,12 +7,12 @@ The database retains schema name `pi-dspy-gepa-workflows-state` and schema versi
 Tables:
 
 - `metadata`: the exact campaign schema identifier.
-- `campaigns`: unique ID and worktree plus camelCase campaign metadata. Repository, base, goal, authority, constraints, candidate, and recorded acceptance are immutable. Status, notes, session path, result and evidence can change.
+- `campaigns`: unique ID and worktree plus camelCase campaign metadata. Repository, base, goal, authority, constraints, candidate, recorded plan, and recorded acceptance are immutable. Status, workflow stage (`plan`, `implement`, `review`, `fix`), notes, session path, result and evidence can change. The table requires explicit stage and plan fields; the previous single-predictor alpha state fails the read-only shape check and must be reset explicitly.
 - `owners`: one live process token per worktree. A dead token is replaced only during an explicit claim. Release is conditional on the matching token.
-- `candidates`: content-addressed immutable learned instructions, validated demonstrations, fixed-program identity, and runtime provenance.
+- `candidates`: content-addressed immutable stage-specific instructions and validated demonstrations, fixed-program identity, and runtime provenance. Exactly four stages are present; review examples carry typed reviews rather than tool actions.
 - `profiles`: a repository's human-approved default candidate.
 - `cases`: immutable evaluation cases. Changed content requires a new case ID.
-- `experiments`: candidate/corpus/configuration identities, preventing repeated idle admission.
+- `experiments`: candidate/corpus/source-evidence/configuration identities, preventing repeated post-campaign admission.
 - `trials`: per-case quality, status, usage, timing and artifact references.
 
 All persisted structured records use camelCase fields and versioned `schema` identifiers. Existing alpha version identifiers remain `v1`; the superseded workflow implementation has been removed.

@@ -14,7 +14,7 @@ export class IdleLearning {
   }
   update(): void {
     if (this.closed) return;
-    const idle = ["paused", "completed"].includes(this.control.campaign.status);
+    const idle = this.control.campaign.status === "completed";
     if (!idle) {
       this.active?.controller.abort(new Error("Live work resumed"));
       return;

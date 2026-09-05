@@ -16,7 +16,7 @@ import {
 const SHAPE = `
 CREATE TABLE metadata (schema TEXT NOT NULL, schemaVersion INTEGER NOT NULL);
 INSERT INTO metadata VALUES ('pi-dspy-gepa-workflows-state',1);
-CREATE TABLE campaigns (id TEXT PRIMARY KEY, worktree TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
+CREATE TABLE campaigns (id TEXT PRIMARY KEY, worktree TEXT NOT NULL UNIQUE, data TEXT NOT NULL CHECK (json_extract(data, '$.stage') IS NOT NULL AND json_type(data, '$.plan') IS NOT NULL));
 CREATE TABLE owners (worktree TEXT PRIMARY KEY, token TEXT NOT NULL);
 CREATE TABLE candidates (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE profiles (repository TEXT PRIMARY KEY, candidateId TEXT NOT NULL REFERENCES candidates(id));
@@ -83,8 +83,9 @@ export class Store {
         "constraints",
         "authority",
         "acceptance",
+        "plan",
       ].some((key) => {
-        if (key === "acceptance" && old.acceptance === null) return false;
+        if ((key === "acceptance" || key === "plan") && old[key] === null) return false;
         return (
           JSON.stringify(old[key as keyof Campaign]) !==
           JSON.stringify(campaign[key as keyof Campaign])

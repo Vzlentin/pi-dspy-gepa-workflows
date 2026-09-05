@@ -45,7 +45,7 @@ async function setup() {
     const control = new CampaignControl(
       options.store,
       options.campaign,
-      async () => review,
+      { workflow: async () => review, acceptance: async () => review },
       join(f.root, "artifacts"),
     );
     return {
@@ -109,10 +109,9 @@ it("launches committed worktree with explicit contract and provides human-only a
   );
   mocks.run.mockImplementation(async () => {
     const options = mocks.open.mock.calls.at(-1)![0];
-    const learnedId = options.store.addCandidate({
-      ...seedCandidate(),
-      instructions: "New default",
-    });
+    const learned = seedCandidate();
+    learned.stages.plan.instructions = "New default";
+    const learnedId = options.store.addCandidate(learned);
     expect(await options.commands.approve(learnedId)).toContain("remains pinned");
     expect(await options.commands.learning()).toContain("trials");
   });
@@ -149,11 +148,10 @@ it.each(["root", "subdirectory", "symlink"])(
   async (kind) => {
     const f = await setup();
     const db = new Store(f.state);
-    const id = db.addCandidate({
-      ...seedCandidate(),
-      repository: f.repository,
-      instructions: "Approved repository policy",
-    });
+    const learned = seedCandidate();
+    learned.repository = f.repository;
+    learned.stages.plan.instructions = "Approved repository policy";
+    const id = db.addCandidate(learned);
     db.approve(f.repository, id);
     db.close();
     const subdirectory = join(f.repository, "nested");
@@ -216,6 +214,10 @@ it("starts bounded learning only on idle and reports model reflection and result
   mocks.run.mockImplementation(async () => {
     const live = await mocks.open.mock.results.at(-1)!.value;
     live.control.pause();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mocks.experiment).not.toHaveBeenCalled();
+    live.control.campaign.status = "completed";
+    live.control.changed();
     await vi.waitFor(() => expect(mocks.experiment).toHaveBeenCalled());
   });
   await launch(["start", "--repo", f.repository, "--goal", "Goal", "--config", config, ...f.args]);

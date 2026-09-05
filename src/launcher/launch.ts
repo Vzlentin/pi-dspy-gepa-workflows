@@ -149,6 +149,7 @@ async function interact(
             candidate,
             allowance,
             cases,
+            campaign,
             signal,
             idle: () =>
               !live.runtime.session.isStreaming &&

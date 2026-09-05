@@ -29,7 +29,9 @@ def serve(reader, writer):
             request = json.loads(line)
             with contextlib.redirect_stdout(sys.stderr):
                 if request["operation"] == "decide":
-                    result = decide(request["candidate"], request["input"], exchange)
+                    result = decide(
+                        request["candidate"], request["stage"], request["input"], exchange
+                    )
                 elif request["operation"] == "learn":
                     result = learn(request, exchange)
                 else:

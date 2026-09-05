@@ -19,15 +19,14 @@ export function campaignExtension(
       name: "campaign",
       label: "Campaign",
       description:
-        "Save notes, record immutable acceptance criteria/checks before editing, report a blocker, verify, or request completion. Human candidate approval is unavailable to agents.",
+        "Save notes, record the complete plan and immutable acceptance before editing, report a blocker, or request review of the whole change. Failed review enters fix; passing review and independent acceptance complete the campaign. Human candidate approval is unavailable to agents.",
       parameters: Type.Object(
         {
           action: Type.Union([
             Type.Literal("notes"),
-            Type.Literal("acceptance"),
+            Type.Literal("plan"),
             Type.Literal("blocker"),
-            Type.Literal("verify"),
-            Type.Literal("complete"),
+            Type.Literal("review"),
           ]),
           text: Type.Optional(Type.String()),
           acceptance: Type.Optional(
@@ -113,11 +112,11 @@ export function campaignExtension(
       if (control.campaign.status !== "active")
         return { block: true, reason: `Campaign is ${control.campaign.status}` };
       if (["read", "grep", "find", "ls", "campaign"].includes(event.toolName)) return;
-      if (!control.campaign.acceptance)
+      if (!["implement", "fix"].includes(control.campaign.stage))
         return {
           block: true,
           reason:
-            "Record acceptance criteria and verification commands before executing coding actions",
+            "Record the complete plan and acceptance before executing coding actions; only implement and fix may execute code",
         };
       if (!control.campaign.authority.edit && ["edit", "write"].includes(event.toolName))
         return { block: true, reason: "No edit authority" };

@@ -18,9 +18,10 @@ import { type Campaign, type Candidate, ReviewSchema, candidateId } from "../sta
 import type { Store } from "../state/store.js";
 import { accountModels, UsageLedger } from "./accounting.js";
 import { Continuation } from "./continuation.js";
-import { installDispatcher, CONTROL_RULES } from "./dispatcher.js";
+import { installDispatcher, CONTROL_RULES, modelContext } from "./dispatcher.js";
 import { campaignExtension, type CampaignCommands } from "./extension.js";
 import { PythonWorker, type Worker } from "./python.js";
+import { workflowReviewer } from "./review.js";
 import { loadRlm } from "./rlm.js";
 
 type DefaultResourceLoaderOptions = Omit<
@@ -41,6 +42,7 @@ export type SessionOptions = {
   resourceLoaderOptions?: DefaultResourceLoaderOptions;
   worker?: Worker;
   reviewer?: Reviewer;
+  workflowReviewer?: Reviewer;
   beforeModelCall?: () => void;
   signal?: AbortSignal;
   onShutdown?: () => Promise<void>;
@@ -61,6 +63,17 @@ export async function openCampaign(options: SessionOptions): Promise<CampaignSes
     throw new Error("Candidate identity does not match the pinned campaign");
   const artifacts = join(store.root, "campaigns", campaign.id);
   await mkdir(artifacts, { recursive: true, mode: 0o700 });
+  if (options.resume && campaign.sessionPath) {
+    const saved = await stat(campaign.sessionPath).catch(() => undefined);
+    if (!saved?.isFile() || !saved.size)
+      throw new Error(
+        `Campaign transcript is missing or empty: ${campaign.sessionPath}. Restore it before resuming; the worktree and state have been preserved.`,
+      );
+  }
+  const sessionManager =
+    options.resume && campaign.sessionPath
+      ? SessionManager.open(campaign.sessionPath, artifacts)
+      : SessionManager.create(campaign.worktree, artifacts);
   let runtime: AgentSessionRuntime;
   let continuation: Continuation | undefined;
   let originalStream: ReturnType<typeof installDispatcher>;
@@ -102,7 +115,25 @@ export async function openCampaign(options: SessionOptions): Promise<CampaignSes
         response.content.map((part) => (part.type === "text" ? part.text : "")).join(""),
       );
     });
-  const control = new CampaignControl(store, campaign, reviewer, artifacts);
+  const worker = options.worker ?? new PythonWorker(join(artifacts, "python.log"));
+  const learnedReview =
+    options.workflowReviewer ??
+    workflowReviewer(
+      worker,
+      candidate,
+      join(artifacts, "dspy-traces.jsonl"),
+      async (payload, signal) => {
+        const model = runtime.session.model;
+        if (!model) throw new Error("Workflow review model is unavailable");
+        return (await originalStream(model, modelContext(payload), { signal })).result();
+      },
+    );
+  const control = new CampaignControl(
+    store,
+    campaign,
+    { workflow: learnedReview, acceptance: reviewer },
+    artifacts,
+  );
   const commands: CampaignCommands = {
     async shutdown() {
       continuation?.close();
@@ -128,18 +159,13 @@ export async function openCampaign(options: SessionOptions): Promise<CampaignSes
   };
   const extension = campaignExtension(control, commands, editor);
   const agentDir = options.agentDir ?? getAgentDir();
-  if (options.resume && campaign.sessionPath) {
-    const saved = await stat(campaign.sessionPath).catch(() => undefined);
-    if (!saved?.isFile() || !saved.size)
-      throw new Error(
-        `Campaign transcript is missing or empty: ${campaign.sessionPath}. Restore it before resuming; the worktree and state have been preserved.`,
-      );
+  if (options.resume && campaign.stage === "review") {
+    campaign.stage = "fix";
+    campaign.notes.push(
+      "Review was interrupted. Inspect current artifacts and request a fresh review; no operation was replayed.",
+    );
+    control.changed();
   }
-  const sessionManager =
-    options.resume && campaign.sessionPath
-      ? SessionManager.open(campaign.sessionPath, artifacts)
-      : SessionManager.create(campaign.worktree, artifacts);
-  const worker = options.worker ?? new PythonWorker(join(artifacts, "python.log"));
   try {
     runtime = await createAgentSessionRuntime(
       async (target) => {
@@ -223,7 +249,7 @@ export async function openCampaign(options: SessionOptions): Promise<CampaignSes
   const initialMessage = options.resume
     ? "Explicitly resume this campaign. The previous process ended: the IPython kernel and DSPy worker are fresh; Python variables were lost, files and saved notes survive. Inspect the working tree, saved notes, and full transcript before choosing the next action. Do not repeat the last tool call automatically.\n" +
       control.brief()
-    : "Pursue this campaign. First read repository instructions and record acceptance criteria and verification commands before editing.\n" +
+    : "Follow plan -> implement -> review -> fix -> review. First inspect repository instructions and record the complete plan through campaign plan, including acceptance criteria and verification commands unless already recorded. Request campaign review when the whole change is ready.\n" +
       control.brief();
   return {
     runtime,

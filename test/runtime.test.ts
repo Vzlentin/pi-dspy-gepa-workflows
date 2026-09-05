@@ -4,7 +4,13 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { ownerAlive, ownerToken } from "../src/campaign/workspace.js";
-import { installDispatcher, modelContext, addUsage, zeroUsage } from "../src/runtime/dispatcher.js";
+import {
+  installDispatcher,
+  modelContext,
+  addUsage,
+  zeroUsage,
+  fixedStageInstructions,
+} from "../src/runtime/dispatcher.js";
 import { PythonWorker, PACKAGE_ROOT } from "../src/runtime/python.js";
 import { openCampaign, type CampaignSession } from "../src/runtime/session.js";
 import { fixture, FakeWorker, call, model, fakeStream, assistant, review } from "./helpers.js";
@@ -28,7 +34,8 @@ async function setup(actions: ConstructorParameters<typeof FakeWorker>[0]) {
 it("runs multiple work items through real Pi tools and continues after ordinary responses and RLM final", async () => {
   const f = await setup([
     call("campaign", {
-      action: "acceptance",
+      action: "plan",
+      text: "Change source to finished and verify it.",
       acceptance: {
         criteria: ["Source is finished"],
         commands: ['test "$(cat source.txt)" = finished'],
@@ -37,7 +44,7 @@ it("runs multiple work items through real Pi tools and continues after ordinary 
     call("write", { path: "source.txt", content: "finished" }),
     { text: "First item done", toolCalls: [] },
     call("ipython", { code: "await rlm.final('item two')" }),
-    call("campaign", { action: "complete" }),
+    call("campaign", { action: "review" }),
   ]);
   await f.live.runHeadless(AbortSignal.timeout(10000));
   expect(f.campaign.status).toBe("completed");
@@ -64,6 +71,9 @@ it("routes summaries to original Pi stream and persists goal/notes after compact
   f.worker.actions.push(call("campaign", { action: "blocker", text: "Need next requirement" }));
   await f.live.runtime.session.prompt("Reloaded");
   expect(f.campaign.status).toBe("blocked");
+  expect(f.worker.calls.at(-1)).toMatchObject({
+    input: { inheritedInstructions: expect.stringContaining(fixedStageInstructions("plan")) },
+  });
 });
 it.each(["unknown", "bad-arguments", "duplicate", "malformed", "worker-failed"])(
   "fails explicitly on %s DSPy output without ordinary reasoning fallback",
@@ -224,6 +234,7 @@ it("runs a persistent real Python DSPy worker over Pi model responses and closes
   try {
     const payload = {
       operation: "decide",
+      stage: "plan",
       candidate: f.candidate,
       input: { inheritedInstructions: "rules", brief: "task", context: "[]", tools: "[]" },
     };
@@ -265,6 +276,8 @@ it("recovers a killed real Pi process without replaying its last completed tool"
   const f = await fixture();
   fixtures.push(f);
   f.campaign.acceptance = { criteria: ["One append"], commands: ["true"] };
+  f.campaign.plan = "Append once and inspect artifacts.";
+  f.campaign.stage = "implement";
   f.store.saveCampaign(f.campaign);
   const marker = join(f.root, "ready");
   const script = join(f.root, "child.mts");

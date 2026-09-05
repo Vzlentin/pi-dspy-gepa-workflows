@@ -15,22 +15,40 @@ export const ActionSchema = object({
 });
 export type Action = Static<typeof ActionSchema>;
 export const PROGRAM_ID = "pi-dspy-gepa.next-action.v1";
+export const STAGES = ["plan", "implement", "review", "fix"] as const;
+export type Stage = (typeof STAGES)[number];
+export const ReviewSchema = object({
+  schema: Type.Literal("pi-dspy-gepa.review.v1"),
+  completeness: Type.Boolean(),
+  correctness: Type.Boolean(),
+  maintainability: Type.Boolean(),
+  findings: text,
+});
+export type Review = Static<typeof ReviewSchema>;
+const DecisionInputSchema = object({
+  inheritedInstructions: Type.String(),
+  brief: Type.String(),
+  context: Type.String(),
+  tools: Type.String(),
+});
+const ActionPolicySchema = object({
+  instructions: text,
+  demonstrations: Type.Array(object({ input: DecisionInputSchema, action: ActionSchema })),
+});
+export const StagesSchema = object({
+  plan: ActionPolicySchema,
+  implement: ActionPolicySchema,
+  review: object({
+    instructions: text,
+    demonstrations: Type.Array(object({ input: DecisionInputSchema, review: ReviewSchema })),
+  }),
+  fix: ActionPolicySchema,
+});
 export const CandidateSchema = object({
   schema: Type.Literal("pi-dspy-gepa.candidate.v1"),
   programId: Type.Literal(PROGRAM_ID),
   repository: Type.Union([Type.Null(), text]),
-  instructions: text,
-  demonstrations: Type.Array(
-    object({
-      input: object({
-        inheritedInstructions: Type.String(),
-        brief: Type.String(),
-        context: Type.String(),
-        tools: Type.String(),
-      }),
-      action: ActionSchema,
-    }),
-  ),
+  stages: StagesSchema,
   provenance: object({
     dspy: Type.Literal("3.3.1"),
     gepa: Type.Literal("0.1.4"),
@@ -65,14 +83,6 @@ export const AcceptanceSchema = object({
   commands: Type.Array(text, { minItems: 1 }),
 });
 export type Acceptance = Static<typeof AcceptanceSchema>;
-export const ReviewSchema = object({
-  schema: Type.Literal("pi-dspy-gepa.review.v1"),
-  completeness: Type.Boolean(),
-  correctness: Type.Boolean(),
-  maintainability: Type.Boolean(),
-  findings: text,
-});
-export type Review = Static<typeof ReviewSchema>;
 export const AllowanceSchema = object({
   maxTrials: Type.Integer({ minimum: 1 }),
   trialDeadlineMs: Type.Integer({ minimum: 1 }),
@@ -98,6 +108,7 @@ export type Evidence = {
   schema: "pi-dspy-gepa.evidence.v1";
   fingerprint: string;
   checks: CheckResult[];
+  workflowReview: Review | null;
   review: Review | null;
   error: string | null;
   passed: boolean;
@@ -116,6 +127,8 @@ export type Campaign = {
   authority: Authority;
   candidateId: string;
   status: Status;
+  stage: Stage;
+  plan: string | null;
   notes: string[];
   acceptance: Acceptance | null;
   evidence: Evidence | null;

@@ -48,7 +48,8 @@ describe("campaign state and contracts", () => {
   });
   it("keeps candidates immutable and promotion applies only to future campaigns", async () => {
     const f = await setup();
-    const learned = { ...f.candidate, instructions: "Try another strategy" };
+    const learned = structuredClone(f.candidate);
+    learned.stages.implement.instructions = "Try another strategy";
     const id = f.store.addCandidate(learned);
     expect(candidateId(learned)).toBe(id);
     expect(f.store.addCandidate(learned)).toBe(id);
@@ -126,9 +127,12 @@ describe("completion and content fingerprints", () => {
     const result = await verify(
       f.campaign,
       join(f.root, "review-committed"),
-      async (input) => {
-        diff = input.diff;
-        return review;
+      {
+        workflow: async () => review,
+        acceptance: async (input) => {
+          diff = input.diff;
+          return review;
+        },
       },
       new AbortController().signal,
     );
@@ -138,20 +142,21 @@ describe("completion and content fingerprints", () => {
   it("requires complete immutable acceptance and host evidence", async () => {
     const f = await setup();
     const signal = new AbortController().signal;
-    const missing = await verify(f.campaign, join(f.root, "checks"), async () => review, signal);
+    const missing = await verify(f.campaign, join(f.root, "checks"), f.control.reviewers, signal);
     expect(missing.passed).toBe(false);
     expect(missing.error).toContain("Record acceptance");
     await f.control.action(
       {
-        action: "acceptance",
+        action: "plan",
+        text: "Inspect source, implement the goal, and run checks.",
         acceptance: { criteria: ["Finished"], commands: ["printf full-output"] },
       },
       signal,
     );
-    await expect(
-      f.control.action({ action: "acceptance", acceptance: {} }, signal),
-    ).rejects.toThrow("already recorded");
-    const result = await f.control.action({ action: "complete" }, signal);
+    await expect(f.control.action({ action: "plan", acceptance: {} }, signal)).rejects.toThrow(
+      "already recorded",
+    );
+    const result = await f.control.action({ action: "review" }, signal);
     expect(result).toMatchObject({ passed: true });
     expect(f.campaign.status).toBe("completed");
     expect(await evidenceCurrent(f.campaign)).toBe(true);
@@ -185,10 +190,13 @@ describe("completion and content fingerprints", () => {
     const evidence = await verify(
       f.campaign,
       join(f.root, "verify"),
-      async () => {
-        if (kind === "mutating-review")
-          await writeFile(join(f.campaign.worktree, "source.txt"), "changed");
-        return kind === "malformed" ? {} : { ...review, correctness: kind !== "review-fail" };
+      {
+        workflow: async () => review,
+        acceptance: async () => {
+          if (kind === "mutating-review")
+            await writeFile(join(f.campaign.worktree, "source.txt"), "changed");
+          return kind === "malformed" ? {} : { ...review, correctness: kind !== "review-fail" };
+        },
       },
       abort.signal,
     );

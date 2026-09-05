@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import type { Context } from "@earendil-works/pi-ai";
 import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { PACKAGE_ROOT } from "../src/runtime/python.js";
-import { assistant, fakeStream, model } from "./helpers.js";
+import { assistant, fakeStream, model, review } from "./helpers.js";
 
 export async function runtimeFixture(root: string, realRlm = false) {
   const agentDir = join(root, "agent");
@@ -70,5 +70,6 @@ export async function runtimeFixture(root: string, realRlm = false) {
       noThemes: true,
     },
     requests,
+    workflowReviewer: async () => review,
   };
 }

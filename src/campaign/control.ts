@@ -1,13 +1,13 @@
 import { AcceptanceSchema, validate, type Campaign } from "../state/contracts.js";
 import type { Store } from "../state/store.js";
-import { verify, evidenceCurrent, type Reviewer } from "./verification.js";
+import { verify, evidenceCurrent, type Reviewers } from "./verification.js";
 
 export class CampaignControl {
   private listeners = new Set<() => void>();
   constructor(
     readonly store: Store,
     readonly campaign: Campaign,
-    readonly reviewer: Reviewer,
+    readonly reviewers: Reviewers,
     readonly artifacts: string,
   ) {}
   changed(): void {
@@ -41,6 +41,7 @@ export class CampaignControl {
     signal: AbortSignal,
   ): Promise<unknown> {
     signal.throwIfAborted();
+    if (this.campaign.status !== "active") throw new Error(`Campaign is ${this.campaign.status}`);
     switch (input.action) {
       case "notes":
         if (!input.text?.trim()) throw new Error("Notes must be nonempty");
@@ -53,26 +54,48 @@ export class CampaignControl {
         this.campaign.result = input.text;
         this.changed();
         return { blocked: input.text };
-      case "acceptance":
-        if (this.campaign.acceptance)
+      case "plan": {
+        if (this.campaign.stage !== "plan") throw new Error("Plan is already recorded");
+        if (!input.text?.trim()) throw new Error("A complete plan is required");
+        if (this.campaign.acceptance && input.acceptance !== undefined)
           throw new Error("Acceptance is already recorded and cannot be weakened");
-        this.campaign.acceptance = validate(AcceptanceSchema, input.acceptance);
+        const acceptance = this.campaign.acceptance ?? validate(AcceptanceSchema, input.acceptance);
+        this.campaign.acceptance = acceptance;
+        this.campaign.plan = input.text;
+        this.campaign.stage = "implement";
         this.changed();
-        return this.campaign.acceptance;
-      case "verify":
-      case "complete": {
-        this.campaign.evidence = await verify(this.campaign, this.artifacts, this.reviewer, signal);
-        if (
-          input.action === "complete" &&
-          this.campaign.status === "active" &&
-          !signal.aborted &&
-          (await evidenceCurrent(this.campaign))
-        ) {
-          this.campaign.status = "completed";
-          this.campaign.result = this.campaign.evidence.review!.findings;
+        return { stage: this.campaign.stage, plan: this.campaign.plan, acceptance };
+      }
+      case "review": {
+        if (this.campaign.stage === "plan") throw new Error("Record the plan before review");
+        this.campaign.stage = "review";
+        this.campaign.evidence = null;
+        this.changed();
+        try {
+          this.campaign.evidence = await verify(
+            this.campaign,
+            this.artifacts,
+            this.reviewers,
+            signal,
+          );
+          if (
+            this.campaign.status === "active" &&
+            !signal.aborted &&
+            (await evidenceCurrent(this.campaign))
+          ) {
+            this.campaign.status = "completed";
+            this.campaign.result = this.campaign.evidence.review!.findings;
+          } else {
+            this.campaign.stage = "fix";
+          }
+          return this.campaign.evidence;
+        } catch (error) {
+          this.campaign.stage = "fix";
+          this.campaign.result = `Review could not finish: ${String(error)}`;
+          throw error;
+        } finally {
+          this.changed();
         }
-        this.changed();
-        return this.campaign.evidence;
       }
       default:
         throw new Error(`Unknown campaign action: ${input.action}`);
@@ -87,10 +110,14 @@ export class CampaignControl {
       baseRef: this.campaign.baseRef,
       authority: this.campaign.authority,
       constraints: this.campaign.constraints,
+      stage: this.campaign.stage,
+      plan: this.campaign.plan,
       acceptance: this.campaign.acceptance,
+      evidence: this.campaign.evidence,
       notes: this.campaign.notes,
       transcriptPath: this.campaign.sessionPath,
       status: this.campaign.status,
+      result: this.campaign.result,
     });
   }
 }

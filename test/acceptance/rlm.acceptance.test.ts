@@ -13,7 +13,8 @@ it("real Pi SDK, real persistent RLM kernel, deterministic DSPy actions and tool
     const options = await runtimeFixture(f.root, true);
     const worker = new FakeWorker([
       call("campaign", {
-        action: "acceptance",
+        action: "plan",
+        text: "Exercise shared scratchpad variables and the focused child, then review.",
         acceptance: {
           criteria: ["Complete two work items with shared variables"],
           commands: ["true"],
@@ -23,7 +24,7 @@ it("real Pi SDK, real persistent RLM kernel, deterministic DSPy actions and tool
       call("ipython", {
         code: "assert counter == 41\ncounter += 1\nh = await rlm.spawn('Reply with fake summary')\nr = await rlm.gather([h])\nassert r[0]['text'] == 'fake summary', r\nawait rlm.final({'counter': counter, 'child': r[0]['text']})",
       }),
-      call("campaign", { action: "complete" }),
+      call("campaign", { action: "review" }),
     ]);
     const live = await openCampaign({ ...f, ...options, worker, reviewer: async () => review });
     const toolErrors: unknown[] = [];

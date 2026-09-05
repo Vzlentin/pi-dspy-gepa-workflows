@@ -1,5 +1,6 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { evidenceCurrent } from "../campaign/verification.js";
 import { PythonWorker, type Worker } from "../runtime/python.js";
 import {
   AllowanceSchema,
@@ -8,6 +9,7 @@ import {
   validate,
   type Allowance,
   type Candidate,
+  type Campaign,
   type EvaluationCase,
 } from "../state/contracts.js";
 import type { Store } from "../state/store.js";
@@ -36,6 +38,7 @@ export interface ExperimentOptions {
   candidate: Candidate;
   allowance: Allowance;
   cases: EvaluationCase[];
+  campaign?: Campaign;
   signal: AbortSignal;
   idle: () => boolean;
   reflect: (prompt: unknown, signal: AbortSignal) => Promise<{ text: string }>;
@@ -58,8 +61,39 @@ export async function runExperiment(options: ExperimentOptions): Promise<{
     !cases.some((value) => value.role === "validation")
   )
     throw new Error("Learning requires training and validation cases");
+  let campaignEvidence: unknown = null;
+  if (options.campaign) {
+    const campaign = options.campaign;
+    if (
+      campaign.repository !== options.repository ||
+      campaign.status !== "completed" ||
+      !(await evidenceCurrent(campaign))
+    )
+      throw new Error(
+        "Post-campaign learning requires fresh completed evidence from this repository",
+      );
+    if (options.cases.some((value) => value.role !== "training" && value.task === campaign.goal))
+      throw new Error("Validation and held-out campaigns cannot supply learning traces");
+    campaignEvidence = {
+      campaignId: campaign.id,
+      goal: campaign.goal,
+      plan: campaign.plan,
+      evidence: campaign.evidence,
+      traces: await readFile(
+        join(options.store.root, "campaigns", campaign.id, "dspy-traces.jsonl"),
+        "utf8",
+      ),
+      checks: await Promise.all(
+        campaign.evidence!.checks.map(async (check) => ({
+          ...check,
+          output: await readFile(check.outputPath, "utf8"),
+        })),
+      ),
+    };
+  }
   const id = digest({
     candidate: options.candidate,
+    campaignEvidence,
     cases,
     allowance: options.allowance,
     repository: options.repository,
@@ -109,6 +143,7 @@ export async function runExperiment(options: ExperimentOptions): Promise<{
         operation: "learn",
         candidate: options.candidate,
         cases,
+        campaignEvidence,
         maxTrials: options.allowance.maxTrials,
       },
       async (kind, payload, signal) => {
@@ -120,18 +155,14 @@ export async function runExperiment(options: ExperimentOptions): Promise<{
         if (kind !== "evaluate") throw new Error(`Unexpected optimizer request: ${kind}`);
         const request = payload as {
           cases: EvaluationCase[];
-          components: Pick<Candidate, "instructions" | "demonstrations">;
+          components: Pick<Candidate, "stages">;
         };
         const candidate = validate(CandidateSchema, {
           ...options.candidate,
           ...request.components,
           repository: options.repository,
         });
-        if (
-          Object.keys(request.components).some(
-            (key) => !["instructions", "demonstrations"].includes(key),
-          )
-        )
+        if (Object.keys(request.components).some((key) => key !== "stages"))
           throw new Error("Optimizer attempted to change a fixed contract");
         const candidateId = options.store.addCandidate(candidate);
         if (!result.candidates.includes(candidateId)) result.candidates.push(candidateId);
@@ -170,10 +201,10 @@ export async function runExperiment(options: ExperimentOptions): Promise<{
         return outcomes;
       },
       signal,
-    )) as { candidates: Pick<Candidate, "instructions" | "demonstrations">[] };
+    )) as { candidates: Pick<Candidate, "stages">[] };
     signal.throwIfAborted();
     for (const learned of proposed.candidates) {
-      if (Object.keys(learned).some((key) => !["instructions", "demonstrations"].includes(key)))
+      if (Object.keys(learned).some((key) => key !== "stages"))
         throw new Error("Optimizer attempted to change a fixed contract");
       const candidateId = options.store.addCandidate(
         validate(CandidateSchema, {

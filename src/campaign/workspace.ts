@@ -53,6 +53,8 @@ export async function startCampaign(
     authority: input.authority ?? { ...LOCAL_AUTHORITY },
     candidateId: input.candidateId,
     status: "active",
+    stage: "plan",
+    plan: null,
     notes: [],
     acceptance: null,
     evidence: null,

@@ -94,7 +94,8 @@ it.each(["pass", "review-stream-error", "malformed"])(
     const live = await openCampaign({
       ...f,
       worker: new FakeWorker([
-        call("campaign", { action: "complete" }),
+        call("campaign", { action: "plan", text: "Review the whole change." }),
+        call("campaign", { action: "review" }),
         call("campaign", { action: "blocker", text: "Review unavailable" }),
       ]),
     });
