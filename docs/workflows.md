@@ -8,6 +8,23 @@ base; the original checkout's staged, unstaged, and untracked source is preserve
 reports metadata and whether completion evidence still matches the working tree.
 `--state /absolute/file.sqlite` selects separate private state.
 
+## Goal text or file
+
+Pass a short goal directly, or keep a complete campaign brief in a UTF-8 file:
+
+```sh
+campaign start --repo /absolute/path/to/repository --goal 'Implement the requested change'
+campaign start --repo /absolute/path/to/repository --base main --goal ./campaign.md
+```
+
+An existing file path is read relative to the launcher's current directory, not `--repo` or the
+new worktree. Otherwise the argument is literal text. Absolute paths and paths starting `./` or
+`../` always mean files: missing or unreadable files fail rather than becoming accidental goals.
+Directories and other non-regular files are rejected. Text and file contents must not be empty or
+whitespace-only. The full contents, including whitespace, are persisted as the goal at launch;
+later file edits do not change it, and resume does not reread the file. An existing file takes
+precedence over literal text with the same name.
+
 ## State and run folders
 
 Default state is `$XDG_STATE_HOME/pi-dspy-gepa-workflows` (`~/.local/state/pi-dspy-gepa-workflows`

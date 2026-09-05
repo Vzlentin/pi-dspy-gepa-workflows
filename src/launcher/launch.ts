@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { resolve, isAbsolute } from "node:path";
 import { parseArgs } from "node:util";
 import { evidenceCurrent } from "../campaign/verification.js";
@@ -10,12 +10,14 @@ import { CaseSchema, validate, type Campaign, type EvaluationCase } from "../sta
 import { Store } from "../state/store.js";
 import { loadConfig } from "./config.js";
 
-export const HELP = `campaign start --repo <absolute-path> --goal <text> [--base <ref>] [--config <file>]
+export const HELP = `campaign start --repo <absolute-path> --goal <text-or-file> [--base <ref>] [--config <file>]
 campaign resume <id> [--config <file>]
 campaign status
 campaign learning
 campaign approve <candidate-id> --repo <absolute-path>
 campaign bootstrap --repo <pi-ipython-rlm-path>
+--goal reads an existing UTF-8 file relative to the current directory, otherwise uses literal text.
+Absolute paths and paths starting ./ or ../ must exist. Empty goals are rejected.
 --state <path> selects an isolated private state database.
 Inside Herdr, each stage runs as a visible pi agent in a pane beside this one. Ctrl-C pauses; resume explicitly.`;
 type Config = Awaited<ReturnType<typeof loadConfig>>;
@@ -59,6 +61,23 @@ export async function launch(argv: string[]): Promise<void> {
     store.close();
   }
 }
+async function resolveGoal(value: string): Promise<string> {
+  const path = resolve(value);
+  let file;
+  try {
+    file = await stat(path);
+  } catch (error) {
+    const explicitPath = isAbsolute(value) || value.startsWith("./") || value.startsWith("../");
+    if (
+      explicitPath ||
+      !["ENOENT", "ENOTDIR", "ENAMETOOLONG"].includes((error as NodeJS.ErrnoException).code ?? "")
+    )
+      throw error;
+    return value;
+  }
+  if (!file.isFile()) throw new Error(`--goal must name a regular file: ${value}`);
+  return readFile(path, "utf8");
+}
 async function select(
   store: Store,
   command: string,
@@ -69,11 +88,13 @@ async function select(
   if (command === "start") {
     if (!values.repo || !values.goal) throw new Error(HELP);
     if (!isAbsolute(values.repo)) throw new Error("--repo must be absolute");
+    const goal = await resolveGoal(values.goal);
+    if (!goal.trim()) throw new Error("--goal must contain nonempty text");
     const repository = await repositoryRoot(values.repo);
     const candidateId = store.defaultCandidate(repository) ?? store.addCandidate(seedCandidate());
     const campaign = await startCampaign(store, {
       repository,
-      goal: values.goal,
+      goal,
       candidateId,
       ...(values.base ? { base: values.base } : {}),
       ...(config.constraints ? { constraints: config.constraints } : {}),

@@ -90,6 +90,62 @@ it("shows help, validates arguments, prints status and bootstraps explicit repos
   expect(mocks.bootstrap).toHaveBeenCalled();
   await launch(["status", ...f.args]);
 });
+it.each(["absolute", "relative", "bare"])(
+  "reads the complete goal from a %s file path",
+  async (kind) => {
+    const f = await setup();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(process, "cwd").mockReturnValue(f.root);
+    const text = "Ship the feature.\n\nKeep all constraints.\n";
+    const file = join(f.root, "campaign goal.md");
+    await writeFile(file, text);
+    const goal =
+      kind === "absolute" ? file : kind === "relative" ? "./campaign goal.md" : "campaign goal.md";
+    await launch(["start", "--repo", f.repository, "--goal", goal, ...f.args]);
+    expect(mocks.open.mock.calls[0]![0].campaign.goal).toBe(text);
+    await writeFile(file, "Changed after launch");
+    const db = new Store(f.state);
+    try {
+      expect(db.campaigns()[0]!.goal).toBe(text);
+    } finally {
+      db.close();
+    }
+  },
+);
+it.each(["Implement change", "Update src/launcher/launch.ts", "Full goal.\n".repeat(1000)])(
+  "preserves literal goals (%#)",
+  async (goal) => {
+    const f = await setup();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    await launch(["start", "--repo", f.repository, "--goal", goal, ...f.args]);
+    expect(mocks.open.mock.calls[0]![0].campaign.goal).toBe(goal);
+  },
+);
+it("rejects missing explicit paths, directories and empty goals before creating a campaign", async () => {
+  const f = await setup();
+  vi.spyOn(process, "cwd").mockReturnValue(f.root);
+  const empty = join(f.root, "empty.md");
+  await writeFile(empty, " \n\t");
+  for (const goal of [
+    join(f.root, "missing.md"),
+    "./missing.md",
+    "../missing.md",
+    f.root,
+    empty,
+    " \n",
+  ]) {
+    await expect(
+      launch(["start", "--repo", f.repository, "--goal", goal, ...f.args]),
+    ).rejects.toThrow();
+  }
+  expect(mocks.open).not.toHaveBeenCalled();
+  const db = new Store(f.state);
+  try {
+    expect(db.campaigns()).toEqual([]);
+  } finally {
+    db.close();
+  }
+});
 it("launches a committed worktree with an explicit contract and human-only approval", async () => {
   const f = await setup();
   const config = join(f.root, "config.json");

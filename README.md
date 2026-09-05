@@ -19,19 +19,25 @@ Use Node 22.19 or newer, Git, uv, and Pi 0.85.0 (for Herdr panes, `pi` on `PATH`
 ```sh
 npm ci
 uv sync --frozen
-npm run build
-node dist/launcher/cli.js start --repo /absolute/path/to/repository --goal 'Implement the requested change'
+npm link
+campaign start --repo /absolute/path/to/repository --goal 'Implement the requested change'
 ```
 
-The installed executable is `campaign`.
+`npm link` builds the checkout and installs `campaign` on your PATH. Rebuild with `npm run build`
+after source changes; normal campaign starts need no build.
 
 ```sh
 campaign start --repo /absolute/path/to/repository --goal 'Implement the requested change' [--base ref] [--config file]
+campaign start --repo /absolute/path/to/repository --base main --goal ./campaign.md
 campaign resume CAMPAIGN_ID
 campaign status
 campaign learning
 campaign approve CANDIDATE_ID --repo /absolute/path/to/repository
 ```
+
+`--goal` accepts literal text or an existing UTF-8 file path, resolved from the current directory.
+Use an absolute path or `./` / `../` prefix to require a file; a missing explicit path is an error.
+The complete file contents are saved in campaign state, so resume does not need the original file.
 
 Inside Herdr (`HERDR_ENV=1`), each stage starts a visible `pi` agent in a new pane beside the
 launcher; you can watch and steer the live session. Elsewhere, stages run headlessly through the Pi
