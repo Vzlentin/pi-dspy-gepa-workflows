@@ -1,6 +1,22 @@
 # Campaign SQLite state
 
-State lives at `~/.pi/agent/pi-dspy-gepa-workflows/state.sqlite`, the package's existing private location. New directories use mode 0700 and the database uses 0600. SQLite uses WAL, foreign keys, and an immediate transaction for ownership claims.
+State lives under `$XDG_STATE_HOME/pi-dspy-gepa-workflows`, falling back to `~/.local/state/pi-dspy-gepa-workflows` when `XDG_STATE_HOME` is unset, empty, or relative. `--state /absolute/path/state.sqlite` overrides the database location; run folders live beside that database. New private directories use mode 0700 and the database uses 0600. SQLite uses WAL, foreign keys, and an immediate transaction for ownership claims.
+
+```text
+pi-dspy-gepa-workflows/
+├── state.sqlite                 # shared campaign index, candidates, and learning records
+├── runs/
+│   └── <campaign-id>/
+│       ├── worktree/            # dedicated Git worktree
+│       ├── <pi-session>.jsonl   # complete conversation
+│       ├── dspy-traces.jsonl
+│       ├── python.log
+│       └── <review artifacts>   # check output and review evidence
+├── experiments/
+└── historical/
+```
+
+The former `~/.pi/agent/pi-dspy-gepa-workflows` location is not read or moved automatically. Databases with the old separate `worktrees/<id>` layout are rejected with reset guidance, without rewriting their paths or deleting their files. Start fresh in the new location; preserve old state and worktrees separately if needed.
 
 The database retains schema name `pi-dspy-gepa-workflows-state` and schema version `1`. Startup checks the exact table definitions and metadata through a read-only connection before opening an existing database for writing. Incompatible workflow state is left intact and rejected with a reset instruction: back up and move `state.sqlite` and its `-wal`/`-shm` companions, then restart. No migrations, compatibility readers, aliases, dual writes, or automatic deletion are provided.
 

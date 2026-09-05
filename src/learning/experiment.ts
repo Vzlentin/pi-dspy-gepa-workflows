@@ -79,10 +79,7 @@ export async function runExperiment(options: ExperimentOptions): Promise<{
       goal: campaign.goal,
       plan: campaign.plan,
       evidence: campaign.evidence,
-      traces: await readFile(
-        join(options.store.root, "campaigns", campaign.id, "dspy-traces.jsonl"),
-        "utf8",
-      ),
+      traces: await readFile(join(options.store.runPath(campaign.id), "dspy-traces.jsonl"), "utf8"),
       checks: await Promise.all(
         campaign.evidence!.checks.map(async (check) => ({
           ...check,

@@ -1,7 +1,7 @@
-import { readFile, writeFile, symlink, chmod, rm } from "node:fs/promises";
+import { readFile, writeFile, symlink, chmod, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { run, git } from "../src/campaign/process.js";
 import { verify, evidenceCurrent } from "../src/campaign/verification.js";
 import {
@@ -22,9 +22,50 @@ async function setup() {
   return value;
 }
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const value of fixtures.splice(0)) await value.close();
 });
 describe("campaign state and contracts", () => {
+  it.each([undefined, "", "relative/state", "/absolute/state"])(
+    "resolves XDG state home %s without using the Pi agent directory",
+    async (xdg) => {
+      const f = await setup();
+      vi.stubEnv("HOME", join(f.root, "home"));
+      vi.stubEnv("XDG_STATE_HOME", xdg);
+      expect(statePath()).toBe(
+        join(
+          xdg === "/absolute/state" ? xdg : join(f.root, "home", ".local", "state"),
+          "pi-dspy-gepa-workflows",
+          "state.sqlite",
+        ),
+      );
+    },
+  );
+  it("creates default state and private run folders under XDG state home", async () => {
+    const f = await setup();
+    vi.stubEnv("XDG_STATE_HOME", join(f.root, "xdg"));
+    const store = new Store();
+    try {
+      const campaign = await startCampaign(store, {
+        repository: f.repository,
+        goal: "Isolated XDG run",
+        candidateId: store.addCandidate(f.candidate),
+      });
+      const directory = join(f.root, "xdg", "pi-dspy-gepa-workflows", "runs", campaign.id);
+      expect(campaign.worktree).toBe(join(directory, "worktree"));
+      expect((await stat(directory)).mode & 0o777).toBe(0o700);
+      expect((await stat(store.filePath)).mode & 0o777).toBe(0o600);
+      const reopened = new Store();
+      try {
+        expect(reopened.getCampaign(campaign.id)).toEqual(campaign);
+        expect(reopened.runPath(campaign.id)).toBe(directory);
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      store.close();
+    }
+  });
   it("isolates committed HEAD and preserves dirty original source", async () => {
     const f = await setup();
     await writeFile(join(f.repository, "source.txt"), "uncommitted");
@@ -71,7 +112,6 @@ describe("campaign state and contracts", () => {
       .run(JSON.stringify(learned), f.campaign.candidateId);
     expect(() => f.store.candidate(f.campaign.candidateId)).toThrow("digest mismatch");
     expect(f.store.campaigns()).toHaveLength(1);
-    expect(statePath()).toContain(".pi/agent/pi-dspy-gepa-workflows/state.sqlite");
     expect(digest({ b: 2, a: 1 })).toBe(digest({ a: 1, b: 2 }));
     const foreign = f.store.addCandidate({ ...learned, repository: "/another/repository" });
     expect(() => f.store.approve(f.repository, foreign)).toThrow("one repository");
@@ -86,6 +126,16 @@ describe("campaign state and contracts", () => {
     const db = new Database(path);
     db.exec("CREATE TABLE workflows(id TEXT)");
     db.close();
+    const before = await readFile(path);
+    expect(() => new Store(path)).toThrow("Back up and move");
+    expect(await readFile(path)).toEqual(before);
+  });
+  it("rejects the superseded worktree layout without modifying its database", async () => {
+    const f = await setup();
+    const path = join(f.root, "old-layout.sqlite");
+    const old = new Store(path);
+    old.saveCampaign({ ...f.campaign, worktree: join(f.root, "worktrees", f.campaign.id) });
+    old.close();
     const before = await readFile(path);
     expect(() => new Store(path)).toThrow("Back up and move");
     expect(await readFile(path)).toEqual(before);

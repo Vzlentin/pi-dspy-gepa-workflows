@@ -1,6 +1,6 @@
 import { mkdirSync, existsSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import Database from "better-sqlite3";
 import {
   candidateId,
@@ -27,7 +27,9 @@ CREATE TABLE trials (id TEXT PRIMARY KEY, experimentId TEXT NOT NULL REFERENCES 
 export const RESET_INSTRUCTION =
   "Incompatible alpha state. Back up and move state.sqlite and its -wal/-shm files, then restart campaign to create a fresh database. Existing state was not changed.";
 export function statePath(): string {
-  return join(homedir(), ".pi", "agent", "pi-dspy-gepa-workflows", "state.sqlite");
+  const xdg = process.env.XDG_STATE_HOME;
+  const root = xdg && isAbsolute(xdg) ? xdg : join(homedir(), ".local", "state");
+  return join(root, "pi-dspy-gepa-workflows", "state.sqlite");
 }
 export class Store {
   readonly db: Database.Database;
@@ -50,6 +52,16 @@ export class Store {
               JSON.stringify(expected.prepare("SELECT * FROM metadata").all())
           )
             throw new Error(RESET_INSTRUCTION);
+          const campaigns = probe.prepare("SELECT id,worktree FROM campaigns").all() as {
+            id: string;
+            worktree: string;
+          }[];
+          if (
+            campaigns.some(
+              (campaign) => campaign.worktree !== join(this.runPath(campaign.id), "worktree"),
+            )
+          )
+            throw new Error(RESET_INSTRUCTION);
         } finally {
           expected.close();
         }
@@ -69,6 +81,9 @@ export class Store {
   }
   close(): void {
     this.db.close();
+  }
+  runPath(id: string): string {
+    return join(this.root, "runs", id);
   }
   saveCampaign(campaign: Campaign): void {
     const old = this.getCampaign(campaign.id);

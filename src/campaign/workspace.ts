@@ -36,8 +36,9 @@ export async function startCampaign(
   );
   store.candidate(input.candidateId);
   const id = randomUUID();
-  const worktree = join(store.root, "worktrees", id);
-  await mkdir(join(store.root, "worktrees"), { recursive: true });
+  const runPath = store.runPath(id);
+  const worktree = join(runPath, "worktree");
+  await mkdir(runPath, { recursive: true, mode: 0o700 });
   await git(repository, "worktree", "add", "--detach", worktree, baseCommit);
   const constraints = [...(await repositoryInstructions(repository)), ...(input.constraints ?? [])];
   const campaign: Campaign = {

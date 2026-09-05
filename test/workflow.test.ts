@@ -251,7 +251,12 @@ it("keeps full fixed skills through all real DSPy stages despite learned prompts
   await live.runHeadless(signal());
   expect(f.campaign.status, f.campaign.result ?? "").toBe("completed");
   expect(script).toHaveLength(0);
-  const tracePath = join(f.store.root, "campaigns", f.campaign.id, "dspy-traces.jsonl");
+  const directory = join(f.store.root, "runs", f.campaign.id);
+  expect(f.campaign.worktree).toBe(join(directory, "worktree"));
+  expect(f.campaign.sessionPath).toBeTruthy();
+  expect(f.campaign.sessionPath!.startsWith(directory + "/")).toBe(true);
+  expect(f.campaign.evidence!.artifactPath.startsWith(directory + "/")).toBe(true);
+  const tracePath = join(directory, "dspy-traces.jsonl");
   const traces = (await readFile(tracePath, "utf8"))
     .trim()
     .split("\n")
@@ -313,7 +318,7 @@ it("resumes interrupted review in fix without replay or lost plan", async () => 
   expect(live.control.brief()).toContain("no operation was replayed");
   await live.runHeadless(signal());
   const traces = await readFile(
-    join(f.store.root, "campaigns", f.campaign.id, "dspy-traces.jsonl"),
+    join(f.store.root, "runs", f.campaign.id, "dspy-traces.jsonl"),
     "utf8",
   );
   expect(JSON.parse(traces.trim()).input.inheritedInstructions).toContain(
@@ -367,7 +372,7 @@ it("uses completed campaign traces for reflection, not as validation or held-out
   };
   await expect(runExperiment(options)).rejects.toThrow("fresh completed evidence");
   await f.control.action({ action: "review" }, signal());
-  const directory = join(f.store.root, "campaigns", f.campaign.id);
+  const directory = join(f.store.root, "runs", f.campaign.id);
   await mkdir(directory, { recursive: true });
   await writeFile(join(directory, "dspy-traces.jsonl"), "Complete plan and fix traces\n");
   const worker = new FakeWorker([

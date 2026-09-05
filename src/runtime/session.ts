@@ -61,7 +61,7 @@ export async function openCampaign(options: SessionOptions): Promise<CampaignSes
   const candidate = store.candidate(campaign.candidateId);
   if (candidateId(options.candidate) !== campaign.candidateId)
     throw new Error("Candidate identity does not match the pinned campaign");
-  const artifacts = join(store.root, "campaigns", campaign.id);
+  const artifacts = store.runPath(campaign.id);
   await mkdir(artifacts, { recursive: true, mode: 0o700 });
   if (options.resume && campaign.sessionPath) {
     const saved = await stat(campaign.sessionPath).catch(() => undefined);

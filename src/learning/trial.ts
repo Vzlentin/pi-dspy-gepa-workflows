@@ -66,7 +66,7 @@ export const runTrial: TrialRunner = async (options) => {
       ],
     });
     campaign.acceptance = options.case.acceptance;
-    trial.tracePath = join(artifacts, "state", "campaigns", campaign.id, "dspy-traces.jsonl");
+    trial.tracePath = join(store.runPath(campaign.id), "dspy-traces.jsonl");
     store.saveCampaign(campaign);
     for (const [index, command] of options.case.setup.entries()) {
       const result = await run("/bin/sh", ["-c", command], campaign.worktree, {

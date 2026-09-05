@@ -2,6 +2,12 @@
 
 A campaign pursues one goal in one repository. Repository paths are resolved to the real Git root before selecting an approved candidate, so an absolute subdirectory or symlink selects the same repository policy. Run `campaign start --repo /absolute/path --goal 'Concrete goal' [--base ref] [--config file] [--rlm /absolute/package/path]`. Pi opens in a detached dedicated worktree from the resolved committed base. The original checkout's staged, unstaged, and untracked source is preserved. `campaign status` reports metadata and whether any completion evidence still matches the working tree. `--state /absolute/file.sqlite` selects separate private state.
 
+## State and run folders
+
+Default state is `$XDG_STATE_HOME/pi-dspy-gepa-workflows` (`~/.local/state/pi-dspy-gepa-workflows` if the variable is unset, empty, or relative). A shared `state.sqlite` indexes campaigns and learning records. Each campaign keeps its dedicated `worktree/`, full Pi transcript, DSPy traces, Python diagnostics, and verification artifacts together under `runs/<campaign-id>/`. Explicit resume reuses that run folder. `--state /absolute/path/state.sqlite` places the index and sibling `runs/` tree at a custom location, including isolated evaluation trials.
+
+Old state under `~/.pi/agent/pi-dspy-gepa-workflows` is neither discovered nor migrated. Databases using the superseded worktree layout fail with a reset instruction; existing files remain intact. See [state storage](SQLITE_STATE.md).
+
 ## Scope, instructions, and completion
 
 By default edit and test authority are true; commit, push, pullRequest, merge, release, and deploy are false. The designated worktree is the edit scope. Unrelated repositories and the original checkout are outside edit scope. Instructions and authority are supplied independently of compacted history on every decision. The plan stage reads applicable repository instructions and records the complete plan, concrete criteria, and verification commands in one `campaign plan` call before coding actions are allowed. When acceptance was supplied at launch, the plan call must omit acceptance rather than replace it. No routine human approval is required to proceed within the recorded scope. Consequential ambiguity requires a concrete blocker and user steering. The recorded plan and acceptance cannot subsequently be replaced or weakened by learned instructions.
